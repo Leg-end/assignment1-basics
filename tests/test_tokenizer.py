@@ -386,12 +386,15 @@ def test_encode_iterable_tinystories_sample_roundtrip():
         merges_path=MERGES_PATH,
     )
     all_ids = []
+    decode_contents = []
     with open(FIXTURES_PATH / "tinystories_sample.txt") as f:
         for _id in tokenizer.encode_iterable(f):
             all_ids.append(_id)
+            decode_contents.append(tokenizer.decode(_id))
     with open(FIXTURES_PATH / "tinystories_sample.txt") as f:
         corpus_contents = f.read()
-    assert tokenizer.decode(all_ids) == corpus_contents
+    decode_contents = ''.join(decode_contents)
+    assert decode_contents == corpus_contents
 
 
 def test_encode_iterable_tinystories_matches_tiktoken():
@@ -406,7 +409,7 @@ def test_encode_iterable_tinystories_matches_tiktoken():
     all_ids = []
     with open(FIXTURES_PATH / "tinystories_sample.txt") as f:
         for _id in tokenizer.encode_iterable(f):
-            all_ids.append(_id)
+            all_ids.extend(_id)
     assert all_ids == reference_ids
 
     assert tokenizer.decode(all_ids) == corpus_contents

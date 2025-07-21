@@ -13,19 +13,20 @@ class Transformer(nn.Module):
                  num_heads: int,
                  d_ff: int,
                  pos_encoder: RoPE | None = None):
-        self.ln1 = RMSNorm(d_model)
+        super().__init__()
+        self.ln1 = RMSNorm(d_model, eps=1e-5)
         self.attn = MultiHeadSelfAttention(
             d_model,
             num_heads,
             pos_encoder=pos_encoder
         )
-        self.ln2 = RMSNorm(d_model)
+        self.ln2 = RMSNorm(d_model, eps=1e-5)
         self.ffn = SwiGLU(d_model, d_ff)
         
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         y = x + self.attn(self.ln1(x))
         
-        output = y + self.ffn(self.ln2(x))
+        output = y + self.ffn(self.ln2(y))
         
         return output
     
@@ -40,6 +41,7 @@ class TransformerLM(nn.Module):
                  num_heads: int,
                  d_ff: int,
                  rope_theta: float):
+        super().__init__()
         self.vocab_size = vocab_size
         self.context_length = context_length
         self.rope = RoPE(d_model // num_heads, rope_theta, context_length)
@@ -53,7 +55,7 @@ class TransformerLM(nn.Module):
             )
             for _ in range(num_layers)
         ])
-        self.ln_final = RMSNorm(d_model)
+        self.ln_final = RMSNorm(d_model, 1e-6)
         self.lm_head = nn.Linear(d_model, vocab_size, bias=False)
         
     def forward(self, x: torch.Tensor) -> torch.Tensor:

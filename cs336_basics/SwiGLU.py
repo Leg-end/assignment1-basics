@@ -20,6 +20,4 @@ class SwiGLU(nn.Module):
         self.w3 = nn.Linear(d_model, d_ff, bias=False)
         
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        o1 = silu(self.w1(x))
-        o2 = self.w3(x)
-        return self.w2(o1 * o2)
+        return self.w2(silu(self.w1(x)) * self.w3(x))

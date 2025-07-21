@@ -17,7 +17,7 @@ from cs336_basics.RMSNorm import RMSNorm
 from cs336_basics.Transformer import Transformer, TransformerLM
 from cs336_basics.Loss import cross_entropy_loss
 from cs336_basics.Optimizer import AdamW
-from cs336_basics.Tokenizer import Tokenizer, train_tokenizer
+from cs336_basics.Tokenizer import BPETokenizer, train_tokenizer
 
 
 
@@ -39,7 +39,7 @@ def run_linear(
     Returns:
         Float[Tensor, "... d_out"]: The transformed output of your linear module.
     """
-    model = torch.nn.Linear(d_in, d_out)
+    model = torch.nn.Linear(d_in, d_out, bias=False)
     model.weight.data.copy_(weights)
     return model(in_features)
 
@@ -62,7 +62,8 @@ def run_embedding(
     Returns:
         Float[Tensor, "... d_model"]: Batch of embeddings returned by your Embedding layer.
     """
-    embedding = torch.nn.Embedding(vocab_size, d_model, _weights=weights)
+    embedding = torch.nn.Embedding(vocab_size, d_model)
+    embedding.weight.data.copy_(weights)
     return embedding(token_ids)
 
 
@@ -152,10 +153,10 @@ def run_multihead_self_attention(
         implementation with the given QKV projection weights and input features.
     """
     attention = MultiHeadSelfAttention(d_model, num_heads)
-    attention.q_proj.weight.copy_(q_proj_weight)
-    attention.k_proj.weight.copy_(k_proj_weight)
-    attention.v_proj.weight.copy_(v_proj_weight)
-    attention.o_proj.weight.copy_(o_proj_weight)
+    attention.q_proj.weight.data.copy_(q_proj_weight)
+    attention.k_proj.weight.data.copy_(k_proj_weight)
+    attention.v_proj.weight.data.copy_(v_proj_weight)
+    attention.output_proj.weight.data.copy_(o_proj_weight)
     return attention(in_features)
 
 
@@ -198,10 +199,10 @@ def run_multihead_self_attention_with_rope(
     """
     rope = RoPE(d_model // num_heads, theta, max_seq_len)
     attention = MultiHeadSelfAttention(d_model, num_heads, pos_encoder=rope)
-    attention.q_proj.weight.copy_(q_proj_weight)
-    attention.k_proj.weight.copy_(k_proj_weight)
-    attention.v_proj.weight.copy_(v_proj_weight)
-    attention.o_proj.weight.copy_(o_proj_weight)
+    attention.q_proj.weight.data.copy_(q_proj_weight)
+    attention.k_proj.weight.data.copy_(k_proj_weight)
+    attention.v_proj.weight.data.copy_(v_proj_weight)
+    attention.output_proj.weight.data.copy_(o_proj_weight)
     return attention(in_features, token_positions)
 
 
@@ -225,7 +226,7 @@ def run_rope(
         Float[Tensor, " ... sequence_length d_k"]: Tensor with RoPEd input.
     """
     rope = RoPE(d_k, theta, max_seq_len)
-    return rope(in_query_or_key, token_positions)
+    return rope(in_query_or_key, token_positions=token_positions)
 
 
 def run_transformer_block(
@@ -415,7 +416,7 @@ def run_rmsnorm(
         RMSNorm of the `in_features`.
     """
     norm = RMSNorm(d_model, eps=eps)
-    norm.weight.copy_(weights)
+    norm.weight.data.copy_(weights)
     return norm(in_features)
 
 
@@ -458,7 +459,7 @@ def run_get_batch(
     # next token labels are current token labels right shift by one offset
     labels = np.stack([dataset[start+1: start + context_length+1] for start in starts])
     
-    return torch.from_numpy(inputs, device).long(), torch.from_numpy(labels, device).long()
+    return torch.from_numpy(inputs).to(device).long(), torch.from_numpy(labels).to(device).long()
 
 
 def run_softmax(in_features: Float[Tensor, " ..."], dim: int) -> Float[Tensor, " ..."]:
@@ -505,8 +506,9 @@ def run_gradient_clipping(parameters: Iterable[torch.nn.Parameter], max_l2_norm:
     parameters = [p for p in parameters if p.grad is not None]
     if len(parameters) == 0:
         return
-    # Calculate total L2 norm of all gradients
-    total_norm = sum(torch.sqrt(torch.sum(p.grad.pow(2))) for p in parameters)
+    # Calculate total L2 norm of all gradients, take all gradients as a single vector
+    # and compute its L2 norm by summing the squares of all gradients and then taking the square root.
+    total_norm = torch.sqrt(sum(torch.sum(p.grad.pow(2)) for p in parameters))
     
     # Calculate clipping coefficient
     clip_coef = max_l2_norm / (total_norm + 1e-6)  # Add small value to avoid division by zero
@@ -614,7 +616,7 @@ def run_load_checkpoint(
     else:
         checkpoint = torch.load(src)
     model.load_state_dict(checkpoint['model'])
-    optimizer.load_state_dict(checkpoint['model'])
+    optimizer.load_state_dict(checkpoint['optimizer'])
     iteration = checkpoint['iteration']
     return iteration
 
@@ -639,7 +641,7 @@ def get_tokenizer(
     Returns:
         A BPE tokenizer that uses the provided vocab, merges, and special tokens.
     """
-    return Tokenizer(vocab, merges, special_tokens=special_tokens)
+    return BPETokenizer(vocab, merges, special_tokens=special_tokens)
 
 
 def run_train_bpe(
