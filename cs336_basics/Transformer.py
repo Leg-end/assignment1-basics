@@ -24,6 +24,7 @@ class Transformer(nn.Module):
         self.ffn = SwiGLU(d_model, d_ff)
         
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # pre-norm: so that it doesn't affect the main residual signal path
         y = x + self.attn(self.ln1(x))
         
         output = y + self.ffn(self.ln2(y))

@@ -30,6 +30,11 @@ class AdamW(Optimizer):
         decouple weight decay from EMA, directly applied in update rules:
             theta_{t+1} = theta_t - eta * ( m^t / (sqrt(v^_t) + epsilon) + lambda * theta_t )
 
+    Relation to other optimizers:
+        momentum = SGD + exponential averaging of grad
+        AdaGrad = SGD + averaging by grad^2
+        RMSProp = AdaGrad + exponentially averaging of grad^2
+        Adam = RMSProp + momentum
     """
     def __init__(self,
                  params: nn.Parameter,

@@ -290,8 +290,10 @@ def train_tokenizer(input_path: str | os.PathLike,
                     special_tokens: list[str],
                     num_process: int = 4) -> tuple[dict[int, bytes], list[tuple[bytes, bytes]]]:
     """
-    TODO
     Why parallely counting frequency of words failed?
+    Casue the parallel counting resulting in incorrect frequency of words.
+    take word "abcbce" as example, the frequency of pair ("b", "c") will be 2 times of its word frequency,
+    but its true frequency should be word count + 1.
     """
     # Step 1: Initialize Vocabulary
     vocab = {i: bytes([i]) for i in range(256)}
