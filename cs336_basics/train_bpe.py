@@ -197,7 +197,8 @@ def train_bpe(
 def merge(counts: dict[tuple[int, int], int], index_dict: dict[tuple[int, int],set[int]], pretokens: list[list[int]], max_pair: tuple[int, int], new_index: int):
     """Merge the pairs with highest frequency and update counts, index_dict"""
     index_set = index_dict[max_pair]
-
+    delta_pair = defaultdict(int)
+    delta_pair[max_pair] += counts.pop(max_pair)
     for i in index_set:
         pretoken = pretokens[i]
         new_pretoken = []
@@ -219,27 +220,40 @@ def merge(counts: dict[tuple[int, int], int], index_dict: dict[tuple[int, int],s
 
         # Update counts and index_dict
         for pos in pos_list:
-            counts[max_pair] -= 1
+            # counts[max_pair] -= 1
+            # delta_pair[max_pair] += 1
 
             if pos > 0:
                 if new_pretoken[pos-1] == new_index:
-                    counts[(max_pair[1], max_pair[0])] -= 1    
-                else:
+                    if max_pair[0] != max_pair[1]:
+                        counts[(max_pair[1], max_pair[0])] -= 1
+                        delta_pair[(max_pair[1], max_pair[0])] += 1
+                elif new_pretoken[pos-1] != max_pair[0]:
                     counts[(new_pretoken[pos-1], max_pair[0])] -= 1
+                    delta_pair[(new_pretoken[pos-1], max_pair[0])] += 1
 
                 counts[(new_pretoken[pos-1], new_pretoken[pos])] += 1
                 index_dict[(new_pretoken[pos-1], new_pretoken[pos])].add(i)
+                delta_pair[(new_pretoken[pos-1], new_pretoken[pos])] -= 1
 
             if pos < len(new_pretoken)-1:
                 if new_pretoken[pos+1] == new_index:
-                    counts[(max_pair[1], max_pair[0])] -= 1     
-                else:
+                    if max_pair[0] != max_pair[1]:
+                        counts[(max_pair[1], max_pair[0])] -= 1
+                        delta_pair[(max_pair[1], max_pair[0])] += 1
+                elif max_pair[1] != new_pretoken[pos+1]:
                     counts[(max_pair[1], new_pretoken[pos+1])] -= 1
+                    delta_pair[(max_pair[1], new_pretoken[pos+1])] += 1
 
                 counts[(new_pretoken[pos], new_pretoken[pos+1])] += 1
                 index_dict[(new_pretoken[pos], new_pretoken[pos+1])].add(i)
+                delta_pair[(new_pretoken[pos], new_pretoken[pos+1])] -= 1
 
         pretokens[i] = new_pretoken
+        for pair, delta in delta_pair.items():
+            if counts[pair] < 0:
+                print(max_pair)
+                print(pair, counts[pair] + delta, counts[pair])
 
 
 class BPETokenizer:

@@ -72,3 +72,16 @@ class MultiHeadSelfAttention(nn.Module):
         output = self.output_proj(o)
         return output
     
+    def get_FLOPS(self, ctx_len):
+        qkv_flops = 3 * 2 * ctx_len * self.d_model * self.d_model
+        if self.pos_encoder is not None:
+            qkv_flops + self.pos_encoder.get_FLOPS(ctx_len)
+        # num_head * each head's QK^T
+        qk_flops = 2 * ctx_len * ctx_len * self.d_model
+        # num_head * each head's softmax
+        softmax_flops = 3 * ctx_len * ctx_len * self.num_heads
+        # num_head * each head's AV
+        v_flops = 2 * ctx_len * ctx_len * self.d_model
+        o_flops = 2 * ctx_len * self.d_model * self.d_model
+        return qkv_flops + qk_flops + softmax_flops + v_flops + o_flops
+    

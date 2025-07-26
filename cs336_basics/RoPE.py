@@ -24,7 +24,8 @@ class RoPE(nn.Module):
                  device: torch.device | None=None):
         super().__init__()
         self.device = device
-        cos, sin = self._init_cache(d_model, theta, max_seq_len)
+        self.d_model = d_model
+        cos, sin = RoPE._init_cache(d_model, theta, max_seq_len)
         self.register_buffer("cos", cos.to(device), persistent=False)
         self.register_buffer("sin", sin.to(device), persistent=False)
     
@@ -43,13 +44,16 @@ class RoPE(nn.Module):
             token_positions = torch.arange(seq_len, device=q.device).unsqueeze(0)
         cos = self.cos[token_positions]  # [B or 1, seq_len, d]
         sin = self.sin[token_positions]
-        # 
+
         q_rotated = q * cos + rotate_half(q) * sin
         if k is not None:
             k_rotated = k * cos + rotate_half(k) * sin
             return q_rotated, k_rotated
         else:
             return q_rotated
+        
+    def get_FLOPS(self, ctx_len):  # for single k
+        return 3 * ctx_len * self.d_model
         
         
         
