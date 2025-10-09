@@ -2,7 +2,7 @@ import os
 import regex as re
 import traceback
 
-from collections import defaultdict
+from collections import defaultdict, Counter
 from typing import BinaryIO, Iterable, Generator
 from multiprocessing import Process, Queue
 from .maxheapdict import HeapDictDescending
@@ -75,7 +75,7 @@ def split_by_special_tokens(text: str,
 
 def pretokenize(text: str,
                 special_tokens: list[str],
-                drop_special_tokens: bool = True) -> Generator:
+                drop_special_tokens: bool = True) -> Generator[bytes, None, None]:
     """
     sentence -> words
     split sentence by special tokens, then split each part by regex pattern
@@ -118,7 +118,7 @@ def bpe_merge(pair_counts: dict[tuple[int, int], int],
     """
     pair_counts.pop(max_pair)
     delta_pair_counts = defaultdict(int)
-    delat_pair2word = defaultdict(set)
+    delta_pair2word = defaultdict(set)
     for i in pair2word[max_pair]:
         word = words[i]
         merged_word = []
@@ -141,38 +141,71 @@ def bpe_merge(pair_counts: dict[tuple[int, int], int],
         for pos in pos_list:
             # warning! exist pair_count[pair] < 0, max_pair = (48, 48) i.e. ('0', '0') or 000
             if pos > 0:
-                if merged_word[pos-1] == new_index:  # e.g. a bc bc e 
-                    delta_pair_counts[(max_pair[1], max_pair[0])] -= 1
-                else:
-                    delta_pair_counts[(merged_word[pos-1], max_pair[0])] -= 1
+                # if merged_word[pos-1] == new_index:  # e.g. a bc bc e 
+                #     delta_pair_counts[(max_pair[1], max_pair[0])] -= 1
+                # else:
+                #     delta_pair_counts[(merged_word[pos-1], max_pair[0])] -= 1
                 
-                delta_pair_counts[(merged_word[pos-1], new_index)] += 1
-                delat_pair2word[(merged_word[pos-1], new_index)].add(i)
+                # delta_pair_counts[(merged_word[pos-1], new_index)] += 1
+                # delta_pair2word[(merged_word[pos-1], new_index)].add(i)
+                left_symbol = merged_word[pos-1]
+                # Handle old pair (left_symbol, max_pair[0])
+                old_pair = (left_symbol, max_pair[0])
+                if old_pair in pair_counts:
+                    delta_pair_counts[old_pair] -= 1
+                # Handle new pair (left_symbol, new_index)
+                new_pair = (left_symbol, new_index)
+                delta_pair_counts[new_pair] += 1
+                delta_pair2word[new_pair].add(i)
             
             if pos < len(merged_word) - 1:
-                if merged_word[pos+1] == new_index:  # e.g. a bc bc e 
-                    delta_pair_counts[(max_pair[1], max_pair[0])] -= 1
-                else:
-                    delta_pair_counts[(max_pair[1], merged_word[pos+1])] -= 1
+                # if merged_word[pos+1] == new_index:  # e.g. a bc bc e 
+                #     delta_pair_counts[(max_pair[1], max_pair[0])] -= 1
+                # else:
+                #     delta_pair_counts[(max_pair[1], merged_word[pos+1])] -= 1
                 
-                delta_pair_counts[(new_index, merged_word[pos+1])] += 1
-                delat_pair2word[(new_index, merged_word[pos+1])].add(i)
+                # delta_pair_counts[(new_index, merged_word[pos+1])] += 1
+                # delta_pair2word[(new_index, merged_word[pos+1])].add(i)
+                right_symbol = merged_word[pos+1]
+                # Handle old pair (max_pair[1], right_symbol)
+                old_pair = (max_pair[1], right_symbol)
+                if old_pair in pair_counts:
+                    delta_pair_counts[old_pair] -= 1
+                # Handle new pair (new_index, right_symbol)
+                new_pair = (new_index, right_symbol)
+                delta_pair_counts[new_pair] += 1
+                delta_pair2word[new_pair].add(i)
     pair2word.pop(max_pair)
+    # for pair, delta in delta_pair_counts.items():
+    #     if pair == max_pair:  # already pop max_pair, not need to update its freq
+    #         continue
+    #     pair_counts[pair] += delta
+    #     # if pair_counts[pair] < 0:
+    #     #     max_word = ''.join(bytes([p]).decode('utf-8', errors="ignore") if p < 256 else new_tok for p in max_pair)
+    #     #     pair_word = ''.join(bytes([p]).decode('utf-8', errors="ignore") if p < 256 else new_tok for p in pair)
+    #     #     print(max_pair, max_word)
+    #     #     print(pair, pair_word, pair_counts[pair] - delta, pair_counts[pair])
+    #     #     print("#"*30)
+    #     if pair_counts[pair] == 0:
+    #         pair_counts.pop(pair)
+    #         pair2word.pop(pair)
+    # for pair, indices in delta_pair2word.items():
+    #     pair2word[pair] = indices
     for pair, delta in delta_pair_counts.items():
-        if pair == max_pair:  # already pop max_pair, not need to update its freq
-            continue
-        pair_counts[pair] += delta
-        # if pair_counts[pair] < 0:
-        #     max_word = ''.join(bytes([p]).decode('utf-8', errors="ignore") if p < 256 else new_tok for p in max_pair)
-        #     pair_word = ''.join(bytes([p]).decode('utf-8', errors="ignore") if p < 256 else new_tok for p in pair)
-        #     print(max_pair, max_word)
-        #     print(pair, pair_word, pair_counts[pair] - delta, pair_counts[pair])
-        #     print("#"*30)
-        if pair_counts[pair] == 0:
-            pair_counts.pop(pair)
-            pair2word.pop(pair)
-    for pair, indices in delat_pair2word.items():
-        pair2word[pair] = indices
+        if pair in pair_counts:
+            pair_counts[pair] += delta
+            if pair_counts[pair] <= 0:
+                pair_counts.pop(pair)
+                pair2word.pop(pair, None)
+        else:
+            if delta > 0:
+                pair_counts[pair] = delta
+    # Merge delta_pair2word into pair2word
+    for pair, indices in delta_pair2word.items():
+        if pair in pair2word:
+            pair2word[pair].update(indices)
+        else:
+            pair2word[pair] = indices
     return list(delta_pair_counts.keys())
                 
 
@@ -278,13 +311,13 @@ class BPETokenizer:
                  special_tokens: list[str] | None = None):
         special_tokens = special_tokens or []
         # Ensure special tokens are in the vocabulary
-        self.cache: dict[str, tuple[bytes]] = {}
+        self.cache: dict[bytes, tuple[bytes]] = {}  # word : tuple of subwords
         self.decoder = vocab
         self.encoder: dict[bytes, int] = {v: k for k, v in vocab.items()}
         n = len(vocab)
         for i, token in enumerate(special_tokens):
             byte_token = token.encode('utf-8')
-            self.cache[token] = [byte_token]  # must be list or tuple
+            self.cache[byte_token] = (byte_token,)
             if byte_token not in self.encoder:
                 token_id = n + i
                 self.decoder[token_id] = byte_token

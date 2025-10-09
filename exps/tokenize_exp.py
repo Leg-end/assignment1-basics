@@ -40,7 +40,7 @@ def train_bpe_tinystories():
         input_path=input_path,
         vocab_size=10000,
         special_tokens=["<|endoftext|>"],
-        num_process=os.cpu_count()
+        num_process=8
     )
     end_time = time.time()
     print(f"Finish training in {end_time - start_time}s")
@@ -50,6 +50,7 @@ def train_bpe_tinystories():
     
 
 if __name__ == "__main__":
+    train_bpe_tinystories()
     # train_bpe()
     # cProfile.run('train_bpe()', filename="/data/lanyun/worksapce/assignment1-basics/exps/tokenize_ana_heap.prof")
     # import pstats
@@ -58,14 +59,14 @@ if __name__ == "__main__":
     # print("="*50)
     # p = pstats.Stats("/data/lanyun/worksapce/assignment1-basics/exps/tokenize_ana_heap.prof")
     # p.sort_stats('cumtime').print_stats(10)
-    lm = TransformerLM(vocab_size=50257,
-                       context_length=1024,
-                       num_layers=48,
-                       d_model=1600,
-                       num_heads=25,
-                       d_ff=6400)
-    from torchsummary import summary
-    summary(lm, input_size=(1024,), batch_size=1, device="cpu")
+    # lm = TransformerLM(vocab_size=50257,
+    #                    context_length=1024,
+    #                    num_layers=48,
+    #                    d_model=1600,
+    #                    num_heads=25,
+    #                    d_ff=6400)
+    # from torchsummary import summary
+    # summary(lm, input_size=(1024,), batch_size=1, device="cpu")
     # print(lm.get_num_params())
     # print(f"require {lm.get_mem() / 1024 * 10024:.1f}MB memory")
     # print(f"Total FLOPS for single input is {lm.get_FLOPS()}.")

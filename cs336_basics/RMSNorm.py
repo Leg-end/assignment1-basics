@@ -13,7 +13,7 @@ class RMSNorm(nn.Module):
         self.eps = eps
         self.weight = nn.Parameter(torch.ones(d_model, device=device))
         
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         # NOTE: in practice, many implementations will
         # manually upcast the input to fp32 here to prevent overflow when you
         # square the input.
@@ -23,7 +23,7 @@ class RMSNorm(nn.Module):
         rms = torch.rsqrt(x.pow(2).mean(dim=-1, keepdim=True) + self.eps)
         return (x * rms * self.weight).to(in_dtype)
     
-    def get_FLOPS(self, ctx_len):
+    def get_FLOPS(self, ctx_len: int) -> int:
         # x.pow.mean: 2LD + 1, +eps, rsqrt: +2
         rms_flops = 2 * ctx_len * self.d_model + 3
         # matrix multiply: 2LD, scalr multiply: + 1

@@ -1,5 +1,6 @@
 import torch
 from torch import nn
+from .linear import Linear, Embedding
 from .RMSNorm import RMSNorm
 from .Attention import MultiHeadSelfAttention, softmax
 from .SwiGLU import SwiGLU
@@ -9,7 +10,7 @@ import os
 import json
 
 
-class Transformer(nn.Module):
+class TransformerBlock(nn.Module):
     
     def __init__(self,
                  d_model: int,
@@ -54,9 +55,9 @@ class TransformerLM(nn.Module):
         self.vocab_size = vocab_size
         self.context_length = context_length
         self.rope = RoPE(d_model // num_heads, rope_theta, context_length) if rope_theta is not None else None
-        self.token_embeddings = nn.Embedding(vocab_size, d_model)
+        self.token_embeddings = Embedding(vocab_size, d_model)
         self.layers = nn.ModuleList([
-            Transformer(
+            TransformerBlock(
                 d_model,
                 num_heads,
                 d_ff,
@@ -65,7 +66,7 @@ class TransformerLM(nn.Module):
             for _ in range(num_layers)
         ])
         self.ln_final = RMSNorm(d_model, 1e-6)
-        self.lm_head = nn.Linear(d_model, vocab_size, bias=False)
+        self.lm_head = Linear(d_model, vocab_size)
         
     def forward(self, x: torch.LongTensor) -> torch.Tensor:
         x = x.to(torch.long)

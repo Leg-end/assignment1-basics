@@ -2,6 +2,7 @@ import torch
 import math
 from torch import nn
 from .RoPE import RoPE
+from .linear import Linear
 
 
 def softmax(x: torch.Tensor, dim: int) -> torch.Tensor:
@@ -45,10 +46,10 @@ class MultiHeadSelfAttention(nn.Module):
         self.num_heads = num_heads
         self.d_model = d_model
         self.pos_encoder = pos_encoder
-        self.q_proj = nn.Linear(d_model, d_model, bias=False)
-        self.k_proj = nn.Linear(d_model, d_model, bias=False)
-        self.v_proj = nn.Linear(d_model, d_model, bias=False)
-        self.output_proj = nn.Linear(d_model, d_model, bias=False)
+        self.q_proj = Linear(d_model, d_model)
+        self.k_proj = Linear(d_model, d_model)
+        self.v_proj = Linear(d_model, d_model)
+        self.output_proj = Linear(d_model, d_model)
         
     def forward(self, x: torch.Tensor, token_positions: torch.Tensor | None = None) -> torch.Tensor:
         seq_len = x.shape[-2]

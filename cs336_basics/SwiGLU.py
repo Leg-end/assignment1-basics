@@ -1,5 +1,6 @@
 import torch
 from torch import nn
+from .linear import Linear
 
 
 def silu(x: torch.Tensor) -> torch.Tensor:
@@ -11,15 +12,15 @@ class SwiGLU(nn.Module):
     """
     Args:
         d_model (int): Dimensionality of the feedforward input and output.
-        d_ff (int): Dimensionality of the up-project happening internally to your swiglu.
+        d_ff (int): Dimensionality of the up-project happening internally to your swiglu. approximately 8/3 * d_model.
     """
     def __init__(self, d_model: int, d_ff: int):
         super().__init__()
         self.d_model = d_model
         self.d_ff = d_ff
-        self.w1 = nn.Linear(d_model, d_ff, bias=False)
-        self.w2 = nn.Linear(d_ff, d_model, bias=False)
-        self.w3 = nn.Linear(d_model, d_ff, bias=False)
+        self.w1 = Linear(d_model, d_ff)
+        self.w2 = Linear(d_ff, d_model)
+        self.w3 = Linear(d_model, d_ff)
         
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.w2(silu(self.w1(x)) * self.w3(x))

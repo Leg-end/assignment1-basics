@@ -10,11 +10,12 @@ import torch
 import numpy as np
 from torch import Tensor
 
+from cs336_basics.linear import Linear, Embedding
 from cs336_basics.SwiGLU import SwiGLU, silu
 from cs336_basics.Attention import scaled_dot_product_attention, MultiHeadSelfAttention, softmax
 from cs336_basics.RoPE import RoPE
 from cs336_basics.RMSNorm import RMSNorm
-from cs336_basics.Transformer import Transformer, TransformerLM
+from cs336_basics.Transformer import TransformerBlock, TransformerLM
 from cs336_basics.Loss import cross_entropy_loss
 from cs336_basics.Optimizer import AdamW
 from cs336_basics.Tokenizer import BPETokenizer, train_tokenizer
@@ -39,7 +40,7 @@ def run_linear(
     Returns:
         Float[Tensor, "... d_out"]: The transformed output of your linear module.
     """
-    model = torch.nn.Linear(d_in, d_out, bias=False)
+    model = Linear(d_in, d_out)
     model.weight.data.copy_(weights)
     return model(in_features)
 
@@ -62,7 +63,7 @@ def run_embedding(
     Returns:
         Float[Tensor, "... d_model"]: Batch of embeddings returned by your Embedding layer.
     """
-    embedding = torch.nn.Embedding(vocab_size, d_model)
+    embedding = Embedding(vocab_size, d_model)
     embedding.weight.data.copy_(weights)
     return embedding(token_ids)
 
@@ -300,7 +301,7 @@ def run_transformer_block(
         running the Transformer block on the input features while using RoPE.
     """
     rope = RoPE(d_model // num_heads, theta, max_seq_len)
-    transformer = Transformer(d_model,
+    transformer = TransformerBlock(d_model,
                               num_heads,
                               d_ff,
                               pos_encoder=rope)
