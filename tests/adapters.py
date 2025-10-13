@@ -18,7 +18,8 @@ from cs336_basics.RMSNorm import RMSNorm
 from cs336_basics.Transformer import TransformerBlock, TransformerLM
 from cs336_basics.Loss import cross_entropy_loss
 from cs336_basics.Optimizer import AdamW
-from cs336_basics.Tokenizer import BPETokenizer, train_tokenizer
+from cs336_basics.Tokenizer import BPETokenizer
+from cs336_basics.train_bpe_fast import train_tokenizer
 
 
 
@@ -333,7 +334,7 @@ def run_transformer_lm(
         num_heads (int): Number of heads to use in multi-headed attention. `d_model` must be
             evenly divisible by `num_heads`.
         d_ff (int): Dimensionality of the feed-forward inner layer (section 3.3).
-        rope_theta (float): The RoPE $\Theta$ parameter.
+        rope_theta (float): The RoPE $\\Theta$ parameter.
         weights (dict[str, Tensor]): 
             State dict of our reference implementation. {num_layers} refers to an
             integer between `0` and `num_layers - 1` (the layer index).

@@ -1,93 +1,115 @@
 import os
-import regex as re
-import traceback
+import heapq
 import time
 
 from collections import defaultdict, Counter
-from typing import BinaryIO, Iterable, Generator
-from multiprocessing import Pool, Queue, cpu_count
-from .maxheapdict import HeapDictDescending
-
-
-PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
-
-
-
-def find_chunk_boundaries(file: BinaryIO,
-                          desired_num_chunks: int,
-                          split_special_token: bytes) -> list[int]:
-    """
-    split file into chunks, each chunk end at split token. last chunk end at EOF
-    since number of split token may less than desired chunk number, the return 
-    number of chunk may <= desired number of chunk
-    The overlapping situation may happen
-    e.g. first chunk and second chunk cllapse at some split token at index p
-    [0, p, p, ...], that means second chunk totally surround by first one.
-    """
-    file.seek(0, os.SEEK_END)
-    file_size = file.tell()
-    file.seek(0)
-    
-    chunk_size = file_size // desired_num_chunks
-    
-    # each number indicate start of chunk, last number indicate pos of EOF
-    # [0, chunk_size, ..., file_size]
-    chunk_boundaries = [i*chunk_size for i in range(desired_num_chunks + 1)]
-    chunk_boundaries[-1] = file_size
-    
-    scope_chunk_size = 4096  # 4kb
-    
-    for i in range(1, len(chunk_boundaries) - 1):
-        start = chunk_boundaries[i]
-        file.seek(start)
-        while True:
-            mini_chunk = file.read(scope_chunk_size)
-            if mini_chunk == b"":  # EOF
-                chunk_boundaries[i] = file_size
-                break
-            
-            # Find split token at pos > min_chunk_size in the mini chunk
-            index = mini_chunk.find(split_special_token)
-            if index != -1:  # update boundary pos
-                chunk_boundaries[i] = start + index
-                break
-            start += scope_chunk_size
-    return sorted(set(chunk_boundaries))
-
-
-def split_by_special_tokens(text: str,
-                            special_tokens: list[str]) -> list[str]:
-    special_tokens_sorted = sorted(special_tokens, key=len, reverse=True)
-    if not special_tokens_sorted:
-        return [text]
-    else:
-        pat = "|".join(map(re.escape, special_tokens_sorted))
-        return re.split(f"({pat})", text)
-
-
-def pretokenize(text: str,
-                special_tokens: list[str],
-                drop_special_tokens: bool = True) -> Generator[bytes, None, None]:
-    """
-    sentence -> words
-    split sentence by special tokens, then split each part by regex pattern
-    """
-    parts = split_by_special_tokens(text, special_tokens)
-    for part in parts:
-        if not part:
-            continue
-        if part in special_tokens:
-            if not drop_special_tokens:
-                yield part.encode("utf-8")
-        else:
-            for match in re.finditer(PAT, part):
-                word = match.group()
-                if word:
-                    yield word.encode("utf-8")
+from .Tokenizer import pretokenize, find_chunk_boundaries
+from multiprocessing import Pool, cpu_count
+from tqdm import tqdm
                 
 
-def worker(text: str, special_tokens: list[str]):
+def worker(args: tuple[str, list[str]]):
+    text, special_tokens = args
     return Counter(pretokenize(text, special_tokens))
+
+
+class LinkNode:
+    """表示词内一个 token 节点，便于链表原地更新。"""
+    def __init__(self, value, word_freq):
+        self.value = value
+        self.word_freq = word_freq  # 共享引用，节省内存
+        self.prev = None
+        self.next = None
+
+
+class PQItem:
+    """定义优先队列元素，实现自定义比较：频率优先，其次按字典序逆序。"""
+    def __init__(self, freq: int, id_pair: tuple[int, int], byte_pair: tuple[bytes, bytes]):
+        self.freq = freq
+        self.id_pair = id_pair
+        self.byte_pair = byte_pair
+
+    def __lt__(self, other):
+        if self.freq != other.freq:
+            return self.freq > other.freq  # 频率高的先出
+        return self.byte_pair > other.byte_pair  # 字典序大的先出
+    
+
+def bpe_merge(
+    pair_freq: dict[tuple[int, int], int],
+    pair2nodes: dict[tuple[int, int], set[LinkNode]],
+    max_pair: tuple[int, int],
+    new_index: int
+    ):
+    """
+    For case of continuious max_pair, e.g. abcbcbcd, we need do carefully by following steps:
+    1. remove related pairs around max_pair and avoid redundance removal, e.g. remove (c, b) between bcbc twice
+    2. after merge, we get a,bc,bc,bc,d, then we add new pairs around max_pair and avoid redundance addition, e.g.
+       add (bc, bc) twice. so for new left pair, we only add when left is not merging pair, and always add new right pair.
+    3. update pair_freq
+    Args:
+        pair_freq: store symbol pair and its frquency
+        pair2nodes: store symbol pair and indices of word that contains it
+        max_pair: symobal pair with maximum frquency
+        new_index: new index for max_pair to store in vocab
+    """
+    nodes = list(pair2nodes[max_pair])
+    update_pairs = set()
+    # remove related pairs
+    for node1 in nodes:  # max_pair : node, node.next
+        node2 = node1.next
+        if node2 is None:
+            continue
+        cnt = node1.word_freq['cnt']
+        left = node1.prev
+        right = node2.next
+        if left:
+            # remove left pair if left is not merging pair, e.g. not case "a,b_1 c_1,[b_2,c_2],b_3,c_3,d"
+            # if b_1 c_1 already merged, then b_1.next = b_2, left = b_2.prev = b_1, left.value = b_1 c_1 = new_index
+            # no need to remove (b_1 c_1, b_2)
+            # else b_1 c_1 not merged, then b_1.next = c_1, left = b_2.prev = c_1, left.value = c_1 != new_index
+            # need to remove (c_1, b_2)
+            if left.value != new_index:
+                old_left_pair = (left.value, node1.value)
+                pair2nodes[old_left_pair].discard(left)
+                pair_freq[old_left_pair] -= cnt
+                update_pairs.add(old_left_pair)
+        if right:
+            # remove right pair if right is not merging pair, e.g. not case "a,b_1 c_1,[b_2,c_2],b_3,c_3,d"
+            # if b_3 c_3 already merged, then right = c_2.next = b_3, right.value = b_3 c_3 = new_index
+            # no need to remove (c_2, b_3 c_3)
+            # else b_3 c_3 not merged, then right.value = b_3 != new_index
+            # need to remove (c_2, b_3)
+            if right.value != new_index:
+                old_right_pair = (node2.value, right.value)
+                pair2nodes[old_right_pair].discard(node2)
+                pair_freq[old_right_pair] -= cnt
+                update_pairs.add(old_right_pair)
+        # merge node1 and node2 into node1
+        node1.value = new_index
+        node1.next = right
+        if right:
+            right.prev = node1
+    # add new pairs after merged, e.g. now we have a, b_1 c_1, b_2 c_2, b_3 c_3, d
+    # link list now is a -> b_1 -> b_2 -> b_3 -> d
+    for node1 in nodes:
+        cnt = node1.word_freq['cnt']
+        left = node1.prev
+        right = node1.next
+        # add new left pair if left is not merging pair
+        if left and left.value != new_index:
+            new_left_pair = (left.value, node1.value)
+            pair2nodes[new_left_pair].add(left)
+            pair_freq[new_left_pair] += cnt
+            update_pairs.add(new_left_pair)
+        if right:
+            new_right_pair = (new_index, right.value)
+            pair2nodes[new_right_pair].add(node1)
+            pair_freq[new_right_pair] += cnt
+            update_pairs.add(new_right_pair)
+    del pair_freq[max_pair]
+    del pair2nodes[max_pair]
+    return update_pairs
                 
 
 def train_tokenizer(input_path: str | os.PathLike,
@@ -95,7 +117,7 @@ def train_tokenizer(input_path: str | os.PathLike,
                     special_tokens: list[str],
                     num_chunks: int = 4,
                     num_process: int = 8) -> tuple[dict[int, bytes], list[tuple[bytes, bytes]]]:
-    start = time.time()
+    begin = time.time()
     
     # Step 1: Initialize Vocabulary
     vocab = {i: bytes([i]) for i in range(256)}
@@ -105,21 +127,85 @@ def train_tokenizer(input_path: str | os.PathLike,
             vocab[256 + i] = token
     
     # Step 2: Chunk the text file
-    chunks = []
+    chunk_args = []
     with open(input_path, 'rb') as f:
-        boundaries = find_chunk_boundaries(f, num_chunks, "".encode("utf-8"))
+        boundaries = find_chunk_boundaries(f, num_chunks, "<|endoftext|>".encode("utf-8"))
         for i, (start, end) in enumerate(zip(boundaries[:-1], boundaries[1:])):
             f.seek(start)
-            chunks.append(f.read(end - start).decode("utf-8", errors="ignore"))
-    print(f"Time taken before pretokenizatiuon: {time.time() - start:.2f} s")
+            chunk_args.append((f.read(end - start).decode("utf-8", errors="ignore"), special_tokens))
+    middle = time.time()
+    print(f"Time taken before pretokenizatiuon: {middle - begin:.2f} s")
+    begin = middle
             
     # Step 3: Parallelizing Pre-tokenization and Counting
     if num_process is None:
         num_process = min(cpu_count(), 8)
-    num_process = min(num_process, len(chunks))
+    num_process = min(num_process, len(chunk_args))
     word_freq = Counter()
     with Pool(processes=num_process) as pool:
-        print(f"Starting pre-tokenization with {num_process} processes on {len(chunks)} chunks...")
-        result_iter = pool.imap_unordered(worker, (chunks, special_tokens))
+        print(f"Starting pre-tokenization with {num_process} processes on {len(chunk_args)} chunks...")
+        result_iter = pool.imap_unordered(worker, chunk_args)
+        for counter in tqdm(result_iter, total=len(chunk_args), desc="Pre-tokenization", leave=True):
+            word_freq.update(counter)
+    middle = time.time()
+    print(f"Pre-tokenization and word counting done in {middle - begin:.2f} s")
+    begin = middle
+    
+    # Step 4: Generate merging rules
+    pair_freq: dict[tuple[int, int], int] = defaultdict(int)
+    pair2nodes: dict[tuple[int, int], set[LinkNode]] = defaultdict(set)
+    for word, cnt in tqdm(word_freq.items(), desc="Generating merging rules", leave=True):
+        if len(word) < 2:
+            continue  # skip single-letter word
+        freq = {'cnt': cnt}  # all link nodes share the same freq, saving memory
+        head = LinkNode(word[0], freq)
+        prev_node = head
+        for i in range(1, len(word)):
+            curr_node = LinkNode(word[i], freq)
+            prev_node.next = curr_node
+            curr_node.prev = prev_node
+            pair = (prev_node.value, curr_node.value)
+            pair2nodes[pair].add(prev_node)
+            prev_node = curr_node
+            pair_freq[pair] += cnt
+        
+    pq = [PQItem(freq, pair, (vocab[pair[0]], vocab[pair[1]])) 
+          for pair, freq in pair_freq.items()]
+    heapq.heapify(pq)
+    
+    num_merge = max(vocab_size - len(special_tokens) - 256, 0)
+    pbar = tqdm(total=num_merge, desc="Merging", leave=True)
+    merges = []
+    for i in range(num_merge):
+        if not pq:
+            break
+        
+        max_pair = None
+        while pq:
+            item = heapq.heappop(pq)
+            if item.id_pair not in pair_freq:
+                continue
+            if pair_freq[item.id_pair] == item.freq:
+                max_pair = item.id_pair
+                break
+        if max_pair is None:
+            break
+        
+        new_idx = 256 + len(special_tokens) + i
+        idx1, idx2 = max_pair
+        vocab[new_idx] = vocab[idx1] + vocab[idx2]  # merge into new token
+        merges.append((vocab[idx1], vocab[idx2]))
+        
+        update_pairs = bpe_merge(pair_freq=pair_freq, pair2nodes=pair2nodes,
+                                 max_pair=max_pair, new_index=new_idx)
+        for pair in update_pairs:
+            heapq.heappush(pq, PQItem(pair_freq[pair], pair, (vocab[pair[0]], vocab[pair[1]])))
+        pbar.update(1)
+    pbar.close()
+    end = time.time()
+    print(f"Merging done in {end - begin:.2f} s")
+    return vocab, merges
+    
+        
         
     

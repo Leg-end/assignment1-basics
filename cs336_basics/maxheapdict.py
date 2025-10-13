@@ -2,6 +2,8 @@ try:
     from collections.abc import MutableMapping
 except ImportError:
     from collections import MutableMapping
+    
+# adapt from https://github.com/DanielStutzbach/heapdict/tree/master
 
 
 def doc(s):
@@ -14,7 +16,8 @@ def doc(s):
     return f
 
 
-class HeapDictDescending(MutableMapping):
+class heapdict(MutableMapping):
+    __slots__ = ('heap', 'd')
     __marker = object()
 
     def __init__(self, *args, **kw):
@@ -24,30 +27,32 @@ class HeapDictDescending(MutableMapping):
 
     @doc(dict.clear)
     def clear(self):
-        del self.heap[:]
+        """D.clear() -> None.  Remove all items from D."""
+        self.heap.clear()
         self.d.clear()
 
     @doc(dict.__setitem__)
     def __setitem__(self, key, value):
         if key in self.d:
-            self.pop(key)
-        wrapper = [value, key, len(self)]
+            del self[key]
+        wrapper = [value, key, len(self.heap)]
         self.d[key] = wrapper
         self.heap.append(wrapper)
-        self._increase_key(len(self.heap) - 1)  # 改为 _increase_key
+        self._increase_key(len(self.heap) - 1)
 
-    def _max_heapify(self, i):  # 改为 _max_heapify
-        n = len(self.heap)
-        h = self.heap
+    def _max_heapify(self, i):
+        heap = self.heap
+        n = len(heap)
+        
         while True:
-            l = (i << 1) + 1  # 左子节点
-            r = (i + 1) << 1  # 右子节点
+            left = (i << 1) + 1
+            right = left + 1
             largest = i
 
-            if l < n and h[l][0] > h[largest][0]:  # 改为 >（找最大值）
-                largest = l
-            if r < n and h[r][0] > h[largest][0]:  # 改为 >
-                largest = r
+            if left < n and heap[left][0] > heap[largest][0]:
+                largest = left
+            if right < n and heap[right][0] > heap[largest][0]:
+                largest = right
 
             if largest == i:
                 break
@@ -55,10 +60,11 @@ class HeapDictDescending(MutableMapping):
             self._swap(i, largest)
             i = largest
 
-    def _increase_key(self, i):  # 改为 _increase_key
+    def _increase_key(self, i):
+        heap = self.heap
         while i > 0:
-            parent = (i - 1) >> 1  # 父节点
-            if self.heap[parent][0] > self.heap[i][0]:  # 改为 >
+            parent = (i - 1) >> 1
+            if heap[i][0] <= heap[parent][0]:
                 break
             self._swap(i, parent)
             i = parent
@@ -71,10 +77,18 @@ class HeapDictDescending(MutableMapping):
 
     @doc(dict.__delitem__)
     def __delitem__(self, key):
+        if key not in self.d:
+            raise KeyError(key)
+            
         wrapper = self.d[key]
-        while wrapper[2] > 0:  # 确保不是根节点
-            parent = (wrapper[2] - 1) >> 1
-            self._swap(wrapper[2], parent)
+        pos = wrapper[2]
+        
+        # 将要删除的元素交换到堆顶
+        while pos > 0:
+            parent = (pos - 1) >> 1
+            self._swap(pos, parent)
+            pos = parent
+            
         self.popitem()
 
     @doc(dict.__getitem__)
@@ -86,18 +100,18 @@ class HeapDictDescending(MutableMapping):
         return iter(self.d)
 
     def popitem(self):
-        """Remove and return the (key, value) pair with the highest value."""
+        """D.popitem() -> (k, v), remove and return the (key, value) pair with highest value."""
         if not self.heap:
-            raise KeyError("popitem(): dictionary is empty")
-        
+            raise KeyError("popitem from empty heapdict")
+            
         wrapper = self.heap[0]
-        if len(self.heap) == 1:
-            self.heap.pop()
-        else:
-            self.heap[0] = self.heap.pop()
-            self.heap[0][2] = 0
-            self._max_heapify(0)  # 改为 _max_heapify
+        last = self.heap.pop()
         
+        if self.heap:
+            self.heap[0] = last
+            last[2] = 0
+            self._max_heapify(0)
+            
         del self.d[wrapper[1]]
         return wrapper[1], wrapper[0]
 
@@ -106,7 +120,10 @@ class HeapDictDescending(MutableMapping):
         return len(self.d)
 
     def peekitem(self):
-        """Return the (key, value) pair with the highest value without removing it."""
+        """D.peekitem() -> (k, v), return the (key, value) pair with highest value."""
         if not self.heap:
-            raise KeyError("peekitem(): dictionary is empty")
-        return (self.heap[0][1], self.heap[0][0])
+            raise KeyError("peekitem from empty heapdict")
+        return self.heap[0][1], self.heap[0][0]
+
+    def __repr__(self):
+        return f"heapdict({dict(self)})"
