@@ -41,7 +41,46 @@ class TransformerBlock(nn.Module):
     
     
 class TransformerLM(nn.Module):
-    
+    """
+    Memory allocation:
+        Model Parameters (P)
+            Output Embedding: vocab_size * d_model
+            Transformer Block per layer (L layers):
+                Self-Attention(Q, K, V, O): 4 * d_model^2
+                Feed-Forward(w1, w2, w3, dff = 4 * d_model): 3 * d_ff * d_model = 12 * d_model^2
+                RMSNorm: d_model
+            Final RMSNorm: d_model
+            P = (vocab_size + L + 1) * d_model + 16 * L * d_model^2
+        Activation (A):
+            Embeddings: batch_size * S * d_model
+            Transformer Block per layer (L layers):
+                Self-Attention(Q^T*K matrix): 
+                    QKV Projection: 3 * batch_size * S * d_model
+                    Q^T * K: batch_size * num_heads * S * S
+                    Softmax: batch_size * num_heads * S * S
+                    Attn * V: batch_size * num_heads * S * d_model
+                    Outout Projection: batch_size * S * d_model
+                    Total: (num_heads + 4) * batch_size * S * d_model + 2 * batch_size * num_heads * S^2
+                Feed-Forward Network:
+                    W1: batch_size * S * d_ff = batch_size * S * 4 * d_model
+                    SiLU: batch_size * S * d_ff = batch_size * S * 4 * d_model
+                    W3: batch_size * S * d_ff = batch_size * S * 4 * d_model
+                    W2: batch_size * S * d_model
+                    Total: 13 * batch_size * S * d_model
+                RMSNorm:
+                    input: batch_size * S * d_model
+                    rms: batch_size * S * d_model
+                    batch_size * S * d_model
+                    Total: 2 * batch_size * S * d_model
+            Final RMSForm: 2 * batch_size * S * d_model
+            Output Layer:
+                Output(logits): batch_size * S * vocab_size
+                Cross-Entropy: batch_size * S * vocab_size
+        Gradients = 4P bytes
+        Optimizer State = 3 * 4P bytes
+    Total Peak Memory: 20 PB + 4AB
+
+    """
     def __init__(self,
                  vocab_size: int,
                  context_length: int,

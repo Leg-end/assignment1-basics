@@ -19,7 +19,7 @@ from cs336_basics.Transformer import TransformerBlock, TransformerLM
 from cs336_basics.Loss import cross_entropy_loss
 from cs336_basics.Optimizer import AdamW
 from cs336_basics.Tokenizer import BPETokenizer
-from cs336_basics.train_bpe_fast import train_tokenizer
+from cs336_basics.train_bpe_ori import train_tokenizer
 
 
 

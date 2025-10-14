@@ -35,6 +35,35 @@ class AdamW(Optimizer):
         AdaGrad = SGD + averaging by grad^2
         RMSProp = AdaGrad + exponentially averaging of grad^2
         Adam = RMSProp + momentum
+    For a model with P parameters (float32):
+        Parameters: P * 4B
+        Gradients: P * 4B
+    
+    State Memory:
+        First moment: P * 4B
+        Second moment: P * 4B
+        Parameter (copy for weight decay): P * 4B
+        Total optimizer states: 3P * 4B
+    
+    Total Memory = (4P + 4P + 12P)B = 20PB
+
+    For each parameter element:
+        Moment updates:
+            m = β₁·m + (1-β₁)·g (2 mult + 1 add)
+            v = β₂·v + (1-β₂)·g² (2 mult + 1 add + 1 square)
+        Bias correction:
+            m̂ = m / (1-β₁ᵗ) (1 div)
+            v̂ = v / (1-β₂ᵗ) (1 div)
+        Parameter update:
+            param = param - α·[m̂/(√v̂ + ε) + λ·param] (1 sqrt + 1 div + 3 mult + 2 add)
+        Operation Count per Parameter:
+            Multiplications: ~8
+            Additions: ~5
+            Divisions: ~3
+            Square root: 1
+            Square: 1
+            Total: ~18 FLOPs per parameter
+    
     """
     def __init__(self,
                  params: nn.Parameter,

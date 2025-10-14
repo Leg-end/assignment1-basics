@@ -1,7 +1,9 @@
 from typing import Iterable
 from typing import BinaryIO, Iterable, Generator
+from tqdm import tqdm
 import os
 import regex as re
+import numpy as np
 
 
 PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
@@ -193,7 +195,21 @@ class BPETokenizer:
                    vocab_filepath: str,
                    merges_filepath: str,
                    special_tokens: list[str] | None =None):
-        import json
-        vocab = json.load(open(vocab_filepath))
-        merges = open(merges_filepath).read().splitlines()
+        import pickle
+        with open(vocab_filepath, "rb") as f:
+            vocab = pickle.load(f)
+        with open(merges_filepath, "rb") as f:
+            merges = pickle.load(f)
         return cls(vocab, merges, special_tokens)
+    
+
+def encode_to_array_slow(tokenizer: BPETokenizer,
+                         path: str,
+                         save_path: str):
+    total_tokens = 0
+    with open(path, "r") as f:
+        for line in tqdm(f, desc="Counting tokens"):
+            total_tokens += len(tokenizer.encode(line))
+            
+    dtype = np.int32
+    

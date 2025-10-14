@@ -74,19 +74,10 @@ def train_tokenizer(input_path: str | os.PathLike,
     pbar = tqdm(total=num_merge, desc="Merging", leave=True)
     merges = []
     for i in range(num_merge):
-        if not heap.heap:
+        if not heap:
             break
         
-        max_pair = None
-        while heap.heap:
-            pair, value = heap.popitem()
-            if pair not in pair_freq:
-                continue
-            if pair_freq[pair] == value[0]:
-                max_pair = pair
-                break
-        if max_pair is None:
-            break
+        max_pair, _ = heap.popitem()  # no zombie elements
         
         new_idx = 256 + len(special_tokens) + i
         idx1, idx2 = max_pair

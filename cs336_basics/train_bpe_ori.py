@@ -1,22 +1,136 @@
 import os
 import time
-from collections import defaultdict
-from multiprocessing import Process, Queue
-from .Tokenizer import find_chunk_boundaries, pretokenize
+from collections import defaultdict, Counter
+from multiprocessing import Pool
+from tqdm import tqdm
+from .maxheapdict import heapdict
+from .Tokenizer import find_chunk_boundaries
+from .train_bpe_fast import worker
 
 # adapt from https://github.com/Spectual/stanford-cs336-a1/blob/main/cs336_basics/BPETokenizer.py
 
-def worker(text: str, special_tokens: list[str], q: Queue):
-    """Worker pretokenizing process for multiprocessing"""
-    pretokens = list(pretokenize(text, special_tokens))
-    q.put(pretokens)
-    # print("done")
+def bpe_merge_fast(pair_freq: dict[tuple[int, int], int],
+          pair2wids: dict[tuple[int, int], set[int]],
+          wid_freq: dict[int, int],
+          words: list[list[int]],
+          max_pair: tuple[int, int],
+          new_index: int):
+    """Merge the pairs with highest frequency and update pair_freq, index_dict"""
+    # TODO BUG
+    indices = list(pair2wids[max_pair])
+    update_pairs = set()
+    for i in indices:
+        cnt = wid_freq[i]
+        word = words[i]
+        merged_word = []
+
+        merge_pos_list = []   # Store positions of max_pair for each new pretoken after merge
+        merge_pos = 0
+        j = 0
+
+        # Replace max_pair with new_index in each pretoken
+        while j < len(word):
+            if j < len(word)-1 and (word[j], word[j+1]) == max_pair:
+                merged_word.append(new_index)
+                merge_pos_list.append(merge_pos)
+                j += 2
+            else:
+                merged_word.append(word[j])
+                j += 1
+            merge_pos += 1
+        words[i] = merged_word
+        # a,b,c,b,c,b,c,d
+        # a,b c,b c,b c,d
+        # _,p  ,p  ,p  ,_
+        # Update pair_freq and index_dict
+        for merge_pos in merge_pos_list:
+            if merge_pos > 0 and merged_word[merge_pos-1] != new_index:
+                old_left_pair = (merged_word[merge_pos-1], max_pair[0])
+                pair_freq[old_left_pair] -= cnt
+                pair2wids[old_left_pair].discard(i)
+                update_pairs.add(old_left_pair)
+                
+                new_left_pair = (merged_word[merge_pos-1], new_index)
+                pair_freq[new_left_pair] += cnt
+                pair2wids[new_left_pair].add(i)
+                update_pairs.add(new_left_pair)
+
+            if merge_pos < len(merged_word) - 1:
+                if merged_word[merge_pos+1] != new_index:
+                    old_right_pair = (max_pair[1], merged_word[merge_pos+1])
+                    new_right_pair = (new_index, merged_word[merge_pos+1])
+                else:
+                    old_right_pair = (max_pair[1], max_pair[0])
+                    new_right_pair = (new_index, new_index)
+                pair_freq[old_right_pair] -= cnt
+                pair2wids[old_right_pair].discard(i)
+                update_pairs.add(old_right_pair)
+                
+                pair_freq[new_right_pair] += cnt
+                pair2wids[new_right_pair].add(i)
+                update_pairs.add(new_right_pair)
+    del pair_freq[max_pair]
+    del pair2wids[max_pair]
+    return update_pairs
+
+
+def bpe_merge(pair_freq: dict[tuple[int, int], int],
+          pair2wids: dict[tuple[int, int], set[int]],
+          wid_freq: dict[int, int],
+          words: list[list[int]],
+          max_pair: tuple[int, int],
+          new_index: int):
+    """Merge the pairs with highest frequency and update pair_freq, index_dict"""
+    indices = list(pair2wids[max_pair])
+    update_pairs = set()
+    for i in indices:
+        cnt = wid_freq[i]
+        word = words[i]
+        merged_word = []
+        
+        j = 0
+        while j < len(word):
+            # 检查当前和下一个token是否是要合并的pair
+            if j < len(word) - 1 and (word[j], word[j+1]) == max_pair:
+                # 合并这对token
+                merged_word.append(new_index)
+                j += 2
+            else:
+                # 保持原token
+                merged_word.append(word[j])
+                j += 1
+        
+        # 更新words
+        old_word = words[i]
+        words[i] = merged_word
+        
+        # 删除旧的pair频率（所有包含被影响token的pair）
+        # 重新计算这个word的所有pair频率
+        for k in range(len(old_word) - 1):
+            old_pair = (old_word[k], old_word[k+1])
+            pair_freq[old_pair] -= cnt
+            pair2wids[old_pair].discard(i)
+            update_pairs.add(old_pair)
+        
+        # 添加新的pair频率
+        for k in range(len(merged_word) - 1):
+            new_pair = (merged_word[k], merged_word[k+1])
+            pair_freq[new_pair] += cnt
+            pair2wids[new_pair].add(i)
+            update_pairs.add(new_pair)
+    
+    # 清理空的pair
+    del pair_freq[max_pair]
+    del pair2wids[max_pair]
+    # TODO 定期清理频率为0的pair
+    return update_pairs
 
 def train_tokenizer(
     input_path: str | os.PathLike,
     vocab_size: int,
     special_tokens: list[str],
-    **kwargs,
+    num_process: int = 4,
+    num_chunks: int = 4,
 ) -> tuple[dict[int, bytes], list[tuple[bytes, bytes]]]:
     """Given the path to an input corpus, run train a BPE tokenizer and
     output its vocabulary and merges.
@@ -40,125 +154,78 @@ def train_tokenizer(
                 Merges are ordered by order of creation.
     """
     begin = time.time()
-    special_tokens = special_tokens or []
-    num_merges = max(vocab_size - len(special_tokens) - 256, 0)
-
-    # Initialize vocab
-    vocab = {}
-    vocab = {x:bytes([x]) for x in range(0,256)}
+    
+    # Step 1: Initialize Vocabulary
+    vocab = {i: bytes([i]) for i in range(256)}
     for i, token in enumerate(special_tokens):
-        vocab[256+i] = token.encode("utf-8")
-    merges = []
+        token = token.encode("utf-8")
+        if token not in vocab.values():
+            vocab[256 + i] = token
 
-    # Chunk the text file
-    num_processes = 4
-    chunk_list = []
-    with open(input_path, "rb") as f:
-        boundaries = find_chunk_boundaries(f, num_processes, "<|endoftext|>".encode("utf-8"))
-
-        for start, end in zip(boundaries[:-1], boundaries[1:]):
+    # Step 2: Chunk the text file
+    chunk_args = []
+    with open(input_path, 'rb') as f:
+        boundaries = find_chunk_boundaries(f, num_chunks, "<|endoftext|>".encode("utf-8"))
+        for i, (start, end) in enumerate(zip(boundaries[:-1], boundaries[1:])):
             f.seek(start)
-            chunk = f.read(end - start).decode("utf-8", errors="ignore")
-            chunk_list.append(chunk)
+            chunk_args.append((f.read(end - start).decode("utf-8", errors="ignore"), special_tokens))
     middle = time.time()
     print(f"Time taken before pretokenizatiuon: {middle - begin:.2f} s")
     begin = middle
-
-    # Parallelizing pretokenization
-    pretokens_list = []
-    processes = []
-    q = Queue()
-    for chunk in chunk_list:
-        p = Process(target=worker, args=(chunk, special_tokens, q))
-        p.start()
-        processes.append(p)
-
-    pretokens_list = [q.get() for _ in processes]
-
-    for p in processes:
-        p.join()
-
-    pretokens = [token for tokens in pretokens_list for token in tokens]
+            
+    # Step 3: Parallelizing Pre-tokenization and Counting
+    if num_process is None:
+        num_process = min(cpu_count(), 8)
+    num_process = min(num_process, len(chunk_args))
+    word_freq = Counter()
+    with Pool(processes=num_process) as pool:
+        print(f"Starting pre-tokenization with {num_process} processes on {len(chunk_args)} chunks...")
+        result_iter = pool.imap_unordered(worker, chunk_args)
+        for counter in tqdm(result_iter, total=len(chunk_args), desc="Pre-tokenization", leave=True):
+            word_freq.update(counter)
     middle = time.time()
     print(f"Pre-tokenization and word counting done in {middle - begin:.2f} s")
     begin = middle
 
-    # Merging
-    counts = defaultdict(int)
-    index_dict = defaultdict(set)  # Store pretoken location for each pair
+    # Step 4: Generate merging rules
+    pair_freq: dict[tuple[int, int], int] = defaultdict(int)
+    pair2wids: dict[tuple[int, int], set[int]] = defaultdict(set)
+    wid_freq: dict[int, int] = defaultdict(int)
+    words = []
+    k = 0
+    for word, cnt in tqdm(word_freq.items(), desc="Generating merging rules", leave=True):
+        if len(word) < 2:
+            continue  # skip single-letter word
+        wid_freq[k] = cnt
+        words.append(word)
+        for idx1, idx2 in zip(word[:-1], word[1:]):
+            pair_freq[(idx1, idx2)] += cnt
+            pair2wids[(idx1, idx2)].add(k)
+        k += 1
+            
+    heap = heapdict()
+    for pair, freq in pair_freq.items():
+        heap[pair] = (freq, (vocab[pair[0]], vocab[pair[1]]))
 
-    for j, pretoken in enumerate(pretokens):
-        for index1, index2 in zip(pretoken, pretoken[1:]):
-            counts[index1, index2] += 1
-            index_dict[index1, index2].add(j)
-
+    num_merges = max(vocab_size - len(special_tokens) - 256, 0)
+    pbar = tqdm(total=num_merges, desc="Merging", leave=True)
+    merges = []
     for i in range(num_merges):
-        # Prefer lexicographically greater pair
-        # Example: max([("A", "B"), ("A", "C"), ("B", "ZZ"), ("BA", "A")]) = ('BA', 'A')
-        max_pair = max(
-            counts.items(),
-            key=lambda x: (
-                x[1],  
-                vocab[x[0][0]].decode("utf-8", errors="ignore"),
-                vocab[x[0][1]].decode("utf-8", errors="ignore")
-            )
-        )[0]
+        if not heap:
+            break
+        
+        max_pair, _ = heap.popitem()  # no zombie elements
+        
+        new_idx = 256 + len(special_tokens) + i
+        idx1, idx2 = max_pair
+        vocab[new_idx] = vocab[idx1] + vocab[idx2]  # merge into new token
+        merges.append((vocab[idx1], vocab[idx2]))
 
-        index1, index2 = max_pair
-
-        new_index = 256 + len(special_tokens) + i
-
-        vocab[new_index] = vocab[index1] + vocab[index2]
-        merges.append((vocab[index1], vocab[index2]))
-
-        merge(counts, index_dict, pretokens, max_pair, new_index)
+        update_pairs = bpe_merge_fast(pair_freq, pair2wids, wid_freq, words, max_pair, new_idx)
+        for pair in update_pairs:
+            heap[pair] = (pair_freq[pair], (vocab[pair[0]], vocab[pair[1]]))
+        pbar.update(1)
+    pbar.close()
     end = time.time()
     print(f"Merging done in {end - begin:.2f} s")
-    return (vocab, merges)
-
-def merge(counts: dict[tuple[int, int], int], index_dict: dict[tuple[int, int],set[int]], pretokens: list[list[int]], max_pair: tuple[int, int], new_index: int):
-    """Merge the pairs with highest frequency and update counts, index_dict"""
-    index_set = index_dict[max_pair]
-
-    for i in index_set:
-        pretoken = pretokens[i]
-        new_pretoken = []
-
-        pos_list = []   # Store positions of max_pair for each new pretoken after merge
-        pos = 0
-        j = 0
-
-        # Replace max_pair with new_index in each pretoken
-        while j < len(pretoken):
-            if (j < len(pretoken)-1) and ((pretoken[j], pretoken[j+1]) == max_pair):
-                new_pretoken.append(new_index)
-                pos_list.append(pos)
-                j += 2
-            else:
-                new_pretoken.append(pretoken[j])
-                j += 1
-            pos += 1
-
-        # Update counts and index_dict
-        for pos in pos_list:
-            counts[max_pair] -= 1
-
-            if pos > 0:
-                if new_pretoken[pos-1] == new_index:
-                    counts[(max_pair[1], max_pair[0])] -= 1    
-                else:
-                    counts[(new_pretoken[pos-1], max_pair[0])] -= 1
-
-                counts[(new_pretoken[pos-1], new_pretoken[pos])] += 1
-                index_dict[(new_pretoken[pos-1], new_pretoken[pos])].add(i)
-
-            if pos < len(new_pretoken)-1:
-                if new_pretoken[pos+1] == new_index:
-                    counts[(max_pair[1], max_pair[0])] -= 1     
-                else:
-                    counts[(max_pair[1], new_pretoken[pos+1])] -= 1
-
-                counts[(new_pretoken[pos], new_pretoken[pos+1])] += 1
-                index_dict[(new_pretoken[pos], new_pretoken[pos+1])].add(i)
-
-        pretokens[i] = new_pretoken
+    return vocab, merges
