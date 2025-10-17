@@ -3,6 +3,7 @@ import pickle
 import sys
 import os
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+import logging
 
 from cs336_basics.train_bpe_ori import train_tokenizer as train_tokenizer_ori
 from cs336_basics.train_bpe_fast import train_tokenizer as train_tokenizer_fast
@@ -11,6 +12,15 @@ from tests.common import FIXTURES_PATH
 from cs336_basics.Transformer import TransformerLM
 
 import cProfile
+
+def config_logging():
+    logger = logging.getLogger()  # root logger
+    logger.setLevel(logging.DEBUG)
+    # FileHandler
+    fh = logging.FileHandler('./debug_fast.log')
+    fh.setLevel(logging.INFO)
+    logger.addHandler(fh)
+    return logger 
 
 
 def save_to_disk(vocab_path, merge_path, vocab, merges):
@@ -67,9 +77,10 @@ def debug():
     # max_pairs = [('b', 'c'), ('bc', 'd'), ('bcd', 'e')]
     # new_indices = ['bc', 'bcd', 'bcde']
     # word = ['a', 'b', 'c', 'd', 'e', 'c', 'b', 'c' 'd', 'e', 'b', 'c', 'd', 'b', 'c', 'd', 'e']
-    max_pairs = [('b', 'c')]
-    new_indices = ['x']
-    word = ['b', 'c', 'b', 'c', 'b', 'c']
+    max_pairs = [('e', 'r')]
+    new_indices = ['er']
+    word = " ,T,e,r,re,r,o,s".split(',')
+    update_pairs = set()
     for k in range(len(max_pairs)):
         print(f"Round {k}".center(100, '+'))
         max_pair = max_pairs[k]
@@ -97,9 +108,11 @@ def debug():
             if pos > 0 and merged_word[pos-1] != new_index:
                 old_left_pair = (merged_word[pos-1], max_pair[0])
                 print(f"remove old_left_pair {old_left_pair}")
+                update_pairs.add(old_left_pair)
                 
                 new_left_pair = (merged_word[pos-1], new_index)
                 print(f"add new_left_pair {new_left_pair}")
+                update_pairs.add(new_left_pair)
 
             if pos < len(merged_word) - 1:
                 if merged_word[pos+1] != new_index:
@@ -109,28 +122,30 @@ def debug():
                     old_right_pair = (max_pair[1], max_pair[0])
                     new_right_pair = (new_index, new_index)
                 print(f"remove old_right_pair {old_right_pair}")
+                update_pairs.add(old_right_pair)
                 print(f"add new_right_pair {new_right_pair}")
+                update_pairs.add(new_right_pair)
+    print(f"update_pairs = {update_pairs}")
     
 
 if __name__ == "__main__":
-    debug()
+    # config_logging()
+    # train_bpe_ori()
+    # debug()
     # train_bpe_tinystories()
-    # import pstats
-    # cProfile.run('train_bpe_ori()', filename="/data/lanyun/worksapce/assignment1-basics/exps/tokenize_ana.prof")
-    # print("ori".center(50, "="))
-    # p = pstats.Stats("/data/lanyun/worksapce/assignment1-basics/exps/tokenize_ana.prof")
+    import pstats
+    # cProfile.run('train_bpe_ori()', filename="/data/lanyun/worksapce/assignment1-basics/exps/tokenize_ana_heapq.prof")
+    # print("heapq".center(50, "="))
+    # p = pstats.Stats("/data/lanyun/worksapce/assignment1-basics/exps/tokenize_ana_heapq.prof")
     # p.sort_stats('cumtime').print_stats(10)
-    # # print("heap".center(50, "="))
-    # # p = pstats.Stats("/data/lanyun/worksapce/assignment1-basics/exps/tokenize_ana_heap.prof")
-    # # p.sort_stats('cumtime').print_stats(10)
     # cProfile.run('train_bpe_fast()', filename="/data/lanyun/worksapce/assignment1-basics/exps/tokenize_ana_link.prof")
     # print("link".center(50, "="))
     # p = pstats.Stats("/data/lanyun/worksapce/assignment1-basics/exps/tokenize_ana_link.prof")
     # p.sort_stats('cumtime').print_stats(10)
-    # cProfile.run('train_bpe_accelerate()', filename="/data/lanyun/worksapce/assignment1-basics/exps/tokenize_ana_link_heap.prof")
-    # print("link heap".center(50, "="))
-    # p = pstats.Stats("/data/lanyun/worksapce/assignment1-basics/exps/tokenize_ana_link_heap.prof")
-    # p.sort_stats('cumtime').print_stats(10)
+    cProfile.run('train_bpe_accelerate()', filename="/data/lanyun/worksapce/assignment1-basics/exps/tokenize_ana_link_heap.prof")
+    print("link heap".center(50, "="))
+    p = pstats.Stats("/data/lanyun/worksapce/assignment1-basics/exps/tokenize_ana_link_heap.prof")
+    p.sort_stats('cumtime').print_stats(10)
     # lm = TransformerLM(vocab_size=50257,
     #                    context_length=1024,
     #                    num_layers=48,
