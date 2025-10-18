@@ -5,9 +5,9 @@ import os
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 import logging
 
-from cs336_basics.train_bpe_ori import train_tokenizer as train_tokenizer_ori
-from cs336_basics.train_bpe_fast import train_tokenizer as train_tokenizer_fast
-from cs336_basics.train_bpe_accelerate import train_tokenizer as train_tokenizer_accelerate
+from scripts.train_bpe_ori import train_tokenizer as train_tokenizer_ori
+from scripts.train_bpe_fast import train_tokenizer as train_tokenizer_fast
+from scripts.train_bpe_accelerate import train_tokenizer as train_tokenizer_accelerate
 from tests.common import FIXTURES_PATH
 from cs336_basics.Transformer import TransformerLM
 
@@ -56,7 +56,7 @@ def train_bpe_accelerate():
     )
 
 
-def train_bpe_tinystories():
+def train_bpe_tinystories_ori():
     input_path = "/data/lanyun/worksapce/assignment1-basics/data/TinyStoriesV2-GPT4-train.txt"
     start_time = time.time()
     vocab, merges = train_tokenizer_ori(
@@ -70,6 +70,40 @@ def train_bpe_tinystories():
     print(f"Finish training in {end_time - start_time:.2f}s")
     save_to_disk("/data/lanyun/worksapce/assignment1-basics/assets/tokenizer/ori/tinystories_bpe_vocab.pkl",
                  "/data/lanyun/worksapce/assignment1-basics/assets/tokenizer/ori/tinystories_bpe_merges.pkl",
+                 vocab, merges)
+    
+    
+def train_bpe_tinystories_fast():
+    input_path = "/data/lanyun/worksapce/assignment1-basics/data/TinyStoriesV2-GPT4-train.txt"
+    start_time = time.time()
+    vocab, merges = train_tokenizer_fast(
+        input_path=input_path,
+        vocab_size=10000,
+        special_tokens=["<|endoftext|>"],
+        num_chunks=8,
+        num_process=8
+    )
+    end_time = time.time()
+    print(f"Finish training in {end_time - start_time:.2f}s")
+    save_to_disk("/data/lanyun/worksapce/assignment1-basics/assets/tokenizer/fast/tinystories_bpe_vocab.pkl",
+                 "/data/lanyun/worksapce/assignment1-basics/assets/tokenizer/fast/tinystories_bpe_merges.pkl",
+                 vocab, merges)
+    
+
+def train_bpe_tinystories_accelerate():
+    input_path = "/data/lanyun/worksapce/assignment1-basics/data/TinyStoriesV2-GPT4-train.txt"
+    start_time = time.time()
+    vocab, merges = train_tokenizer_accelerate(
+        input_path=input_path,
+        vocab_size=10000,
+        special_tokens=["<|endoftext|>"],
+        num_chunks=8,
+        num_process=8
+    )
+    end_time = time.time()
+    print(f"Finish training in {end_time - start_time:.2f}s")
+    save_to_disk("/data/lanyun/worksapce/assignment1-basics/assets/tokenizer/accelerate/tinystories_bpe_vocab.pkl",
+                 "/data/lanyun/worksapce/assignment1-basics/assets/tokenizer/accelerate/tinystories_bpe_merges.pkl",
                  vocab, merges)
     
 
@@ -134,17 +168,17 @@ if __name__ == "__main__":
     # debug()
     # train_bpe_tinystories()
     import pstats
-    # cProfile.run('train_bpe_ori()', filename="/data/lanyun/worksapce/assignment1-basics/exps/tokenize_ana_heapq.prof")
-    # print("heapq".center(50, "="))
-    # p = pstats.Stats("/data/lanyun/worksapce/assignment1-basics/exps/tokenize_ana_heapq.prof")
+    # cProfile.run('train_bpe_tinystories_ori()', filename="/data/lanyun/worksapce/assignment1-basics/exps/tokenize_tinystories_heapdict.prof")
+    # print("heapdict".center(50, "="))
+    # p = pstats.Stats("/data/lanyun/worksapce/assignment1-basics/exps/tokenize_tinystories_heapdict.prof")
     # p.sort_stats('cumtime').print_stats(10)
-    # cProfile.run('train_bpe_fast()', filename="/data/lanyun/worksapce/assignment1-basics/exps/tokenize_ana_link.prof")
+    # cProfile.run('train_bpe_tinystories_fast()', filename="/data/lanyun/worksapce/assignment1-basics/exps/tokenize_tinystories_link.prof")
     # print("link".center(50, "="))
-    # p = pstats.Stats("/data/lanyun/worksapce/assignment1-basics/exps/tokenize_ana_link.prof")
+    # p = pstats.Stats("/data/lanyun/worksapce/assignment1-basics/exps/tokenize_tinystories_link.prof")
     # p.sort_stats('cumtime').print_stats(10)
-    cProfile.run('train_bpe_accelerate()', filename="/data/lanyun/worksapce/assignment1-basics/exps/tokenize_ana_link_heap.prof")
+    cProfile.run('train_bpe_tinystories_accelerate()', filename="/data/lanyun/worksapce/assignment1-basics/exps/tokenize_tinystories_link_heap.prof")
     print("link heap".center(50, "="))
-    p = pstats.Stats("/data/lanyun/worksapce/assignment1-basics/exps/tokenize_ana_link_heap.prof")
+    p = pstats.Stats("/data/lanyun/worksapce/assignment1-basics/exps/tokenize_tinystories_link_heap.prof")
     p.sort_stats('cumtime').print_stats(10)
     # lm = TransformerLM(vocab_size=50257,
     #                    context_length=1024,

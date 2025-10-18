@@ -4,8 +4,8 @@ import time
 from collections import defaultdict, Counter
 from tqdm import tqdm
 from multiprocessing import Pool
-from .maxheapdict import heapdict
-from .Tokenizer import find_chunk_boundaries
+from cs336_basics.maxheapdict import heapdict
+from cs336_basics.Tokenizer import find_chunk_boundaries
 from .train_bpe_fast import worker, bpe_merge, LinkNode
                 
 

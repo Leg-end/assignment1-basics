@@ -3,9 +3,13 @@ import heapq
 import time
 
 from collections import defaultdict, Counter
-from .Tokenizer import pretokenize, find_chunk_boundaries
+from cs336_basics.Tokenizer import pretokenize, find_chunk_boundaries, encode_to_nparray, BPETokenizer
 from multiprocessing import Pool, cpu_count
 from tqdm import tqdm
+
+import hydra
+import pickle
+from omegaconf import DictConfig
                 
 
 def worker(args: tuple[str, list[str]]):
@@ -204,8 +208,30 @@ def train_tokenizer(input_path: str | os.PathLike,
     pbar.close()
     end = time.time()
     print(f"Merging done in {end - begin:.2f} s")
-    return vocab, merges
+    return vocab, merges 
+
+@hydra.main(config_path="configs", config_name="tokenizer", version_base=None)
+def main(cfg: DictConfig):
+    if cfg.mode == "train":
+        start_time = time.time()
+        vocab, merges = train_tokenizer(input_path=cfg.input_path,
+                                        vocab_size=cfg.vocab_size,
+                                        special_tokens=cfg.special_tokens,
+                                        num_chunks=cfg.n_workers,
+                                        num_process=cfg.n_workers)
+        end_time = time.time()
+        print(f"Finish training in {end_time - start_time:.2f}s")
+        with open(cfg.vocab_path, "wb") as f:
+            pickle.dump(vocab, f)
+        with open(cfg.merge_path, "wb") as f:
+            pickle.dump(merges, f)
+    else:
+        tokenizer = BPETokenizer.from_files(vocab_path=cfg.vocab_path,
+                                            merges_path=cfg.merge_path,
+                                            special_tokens=cfg.special_tokens)
+        encode_to_nparray(tokenizer, cfg.train_txt_path, cfg.train_data_path, cfg.batch_size, cfg.n_workers)
+        encode_to_nparray(tokenizer, cfg.val_txt_path, cfg.val_data_path, cfg.batch_size, cfg.n_workers)
     
-        
-        
-    
+
+if __name__ == "__main__":
+    main()

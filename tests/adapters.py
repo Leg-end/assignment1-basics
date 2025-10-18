@@ -19,7 +19,7 @@ from cs336_basics.Transformer import TransformerBlock, TransformerLM
 from cs336_basics.Loss import cross_entropy_loss
 from cs336_basics.Optimizer import AdamW
 from cs336_basics.Tokenizer import BPETokenizer
-from cs336_basics.train_bpe_ori import train_tokenizer
+from scripts.train_bpe_fast import train_tokenizer
 
 
 
@@ -456,7 +456,7 @@ def run_get_batch(
         is the sampled input sequences, and the second tuple item is the corresponding
         language modeling labels.
     """
-    starts = np.random.randint(0, len(dataset) - context_length, (batch_size,))
+    starts = np.random.randint(0, len(dataset) - context_length - 1, (batch_size,))
     inputs = np.stack([dataset[start: start + context_length] for start in starts])
     # next token labels are current token labels right shift by one offset
     labels = np.stack([dataset[start+1: start + context_length+1] for start in starts])

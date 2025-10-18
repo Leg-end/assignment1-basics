@@ -6,8 +6,8 @@ from collections import defaultdict, Counter
 from collections import defaultdict, Counter
 from multiprocessing import Pool
 from tqdm import tqdm
-from .maxheapdict import heapdict
-from .Tokenizer import find_chunk_boundaries
+from cs336_basics.maxheapdict import heapdict
+from cs336_basics.Tokenizer import find_chunk_boundaries
 from .train_bpe_fast import worker, PQItem
 
 # adapt from https://github.com/Spectual/stanford-cs336-a1/blob/main/cs336_basics/BPETokenizer.py
@@ -30,7 +30,7 @@ def bpe_merge_fast(pair_freq: dict[tuple[int, int], int],
     So the BUG stays in operation of pair2wids[pair].discard(i)
     Dicard can only happen when pair is unique in word
     Solution: store {word index: cnt of pair in word} as pair2wids's value
-    discard pair only happen when cnt == 1
+    discard pair only when cnt == 1
     """
     indices = list(pair2wids[max_pair].keys())
     update_pairs = set()
@@ -238,44 +238,44 @@ def train_tokenizer(
                 pair2wids[(idx1, idx2)][k] += 1
         k += 1
             
-    # heap = heapdict()
-    # for pair, freq in pair_freq.items():
-    #     heap[pair] = (freq, (vocab[pair[0]], vocab[pair[1]]))
-    pq = [PQItem(freq, pair, (vocab[pair[0]], vocab[pair[1]])) 
-          for pair, freq in pair_freq.items()]
-    heapq.heapify(pq)
+    heap = heapdict()
+    for pair, freq in pair_freq.items():
+        heap[pair] = (freq, (vocab[pair[0]], vocab[pair[1]]))
+    # pq = [PQItem(freq, pair, (vocab[pair[0]], vocab[pair[1]])) 
+    #       for pair, freq in pair_freq.items()]
+    # heapq.heapify(pq)
 
     num_merges = max(vocab_size - len(special_tokens) - 256, 0)
     pbar = tqdm(total=num_merges, desc="Merging", leave=True)
     merges = []
     for i in range(num_merges):
-        # if not heap:
+        if not heap:
+            break
+        
+        max_pair, _ = heap.popitem()  # no zombie elements
+        # if not pq:
         #     break
         
-        # max_pair, _ = heap.popitem()  # no zombie elements
-        if not pq:
-            break
-        
-        max_pair = None
-        while pq:
-            item = heapq.heappop(pq)
-            if item.id_pair not in pair_freq:
-                continue
-            if pair_freq[item.id_pair] == item.freq:
-                max_pair = item.id_pair
-                break
-        if max_pair is None:
-            break
+        # max_pair = None
+        # while pq:
+        #     item = heapq.heappop(pq)
+        #     if item.id_pair not in pair_freq:
+        #         continue
+        #     if pair_freq[item.id_pair] == item.freq:
+        #         max_pair = item.id_pair
+        #         break
+        # if max_pair is None:
+        #     break
         
         new_idx = 256 + len(special_tokens) + i
         idx1, idx2 = max_pair
         vocab[new_idx] = vocab[idx1] + vocab[idx2]  # merge into new token
         merges.append((vocab[idx1], vocab[idx2]))
         update_pairs = bpe_merge_fast(pair_freq, pair2wids, wid_freq, words, max_pair, new_idx)
-        # for pair in update_pairs:
-        #     heap[pair] = (pair_freq[pair], (vocab[pair[0]], vocab[pair[1]]))
         for pair in update_pairs:
-            heapq.heappush(pq, PQItem(pair_freq[pair], pair, (vocab[pair[0]], vocab[pair[1]])))
+            heap[pair] = (pair_freq[pair], (vocab[pair[0]], vocab[pair[1]]))
+        # for pair in update_pairs:
+        #     heapq.heappush(pq, PQItem(pair_freq[pair], pair, (vocab[pair[0]], vocab[pair[1]])))
         pbar.update(1)
     pbar.close()
     end = time.time()

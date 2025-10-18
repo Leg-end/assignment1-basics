@@ -1,6 +1,7 @@
 from typing import Iterable
 from typing import BinaryIO, Iterable, Generator
 from tqdm import tqdm
+from concurrent.futures import ProcessPoolExecutor, as_completed
 import os
 import regex as re
 import numpy as np
@@ -118,6 +119,8 @@ class BPETokenizer:
         self.merges = merges
         self.bpe_rank = dict(zip(merges, range(len(merges))))
         self.special_tokens = special_tokens
+        self.vocab_size = len(self.encoder)
+        self.eos_token_id = 256
         
     
     def bpe(self, word: bytes) -> list[bytes]:
@@ -192,24 +195,85 @@ class BPETokenizer:
     
     @classmethod
     def from_files(cls,
-                   vocab_filepath: str,
-                   merges_filepath: str,
+                   vocab_path: str,
+                   merges_path: str,
                    special_tokens: list[str] | None =None):
         import pickle
-        with open(vocab_filepath, "rb") as f:
+        with open(vocab_path, "rb") as f:
             vocab = pickle.load(f)
-        with open(merges_filepath, "rb") as f:
+        with open(merges_path, "rb") as f:
             merges = pickle.load(f)
         return cls(vocab, merges, special_tokens)
     
 
-def encode_to_array_slow(tokenizer: BPETokenizer,
-                         path: str,
-                         save_path: str):
+def encode_to_nparray_slow(tokenizer: BPETokenizer,
+                           path: str,
+                           save_path: str):
+    with open(path, "r") as f:
+        num_lines = sum(1 for _ in f)
+    
     total_tokens = 0
     with open(path, "r") as f:
-        for line in tqdm(f, desc="Counting tokens"):
+        for line in tqdm(f, total=num_lines, desc="Counting tokens"):
             total_tokens += len(tokenizer.encode(line))
             
     dtype = np.int32
+    tokens_mm = np.memmap(save_path, dtype=dtype, mode="w+", shape=(total_tokens,))
+    
+    pos = 0
+    with open(path, "r") as f:
+        for line in tqdm(f, total=num_lines, desc="Tokenizing"):
+            ids = tokenizer.encode(line)
+            n = len(ids)
+            tokens_mm[pos:pos+n] = ids
+            pos += n
+    tokens_mm.flush()
+    
+
+def batch_tokenize(batch, tokenizer):
+    out = []
+    for line in batch:
+        out.append(tokenizer.encode(line))
+    return np.array(out, dtype=np.int32)
+
+
+def encode_to_nparray(tokenizer: BPETokenizer,
+                      path: str,
+                      save_path: str,
+                      batch_size: int = 4096,
+                      n_workers: int = 8):
+    
+    # split into batches
+    
+    batches = []
+    with open(path, "r") as f:
+        batch = []
+        for line in f:
+            batch.append(line)
+            if len(batch) == batch_size:
+                batches.append(batch)
+                batch = []
+        if batch:
+            batches.append(batch)
+            
+    total_tokens = 0
+    results = []
+    # multi-processing tokenization
+    with ProcessPoolExecutor(max_workers=n_workers) as exe:
+        futures = []
+        for batch in batches:
+            futures.append(exe.submit(batch_tokenize, batch, tokenizer))
+        for future in tqdm(as_completed(futures), total=len(futures), desc="Tokenizing"):
+            result = future.result()
+            results.append(result)
+            total_tokens += result.shape[0]
+    
+    # write into memmap
+    os.makedirs(os.path.dirname(save_path), exist_ok=True)
+    tokens_mm = np.memmap(save_path, dtype=np.int32, mode="w+", shape=(total_tokens,))
+    pos = 0
+    for result in results:
+        tokens_mm[pos:pos+result.shape[0]] = result
+        pos += result.shape[0]
+    tokens_mm.flush()
     
