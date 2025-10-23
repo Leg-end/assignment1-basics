@@ -1,11 +1,10 @@
 # hydra:
 #   run:
 #     dir: ./my_output_dir  # save outputs to custom dir
-
 root_dir: ${hydra:runtime.cwd}  # 运行代码的根目录
 
 
-dataset_name: owt     # `TinyStories` or `owt`, change as needed
+dataset_name: TinyStories     # `TinyStories` or `owt`, change as needed
 dataset_split: train          # `train` or `valid`, change as needed
 
 data_dir: ${root_dir}/data/${dataset_name}
@@ -15,8 +14,8 @@ train_txt_path: ${txt_dir}/train.txt
 valid_txt_path: ${txt_dir}/valid.txt
 
 input_path: ${txt_dir}/${dataset_split}.txt   # txt data for training tokenizer
-train_data_path: ${dat_dir}/train.dat
-val_data_path: ${dat_dir}/valid.dat
+train_dat_path: ${dat_dir}/train.dat
+valid_dat_path: ${dat_dir}/valid.dat
 
 tokenizer_dir: ${root_dir}/tokenizers/${dataset_name}_${dataset_split}/ # save path for tokenizer
 vocab_path: ${tokenizer_dir}/vocab.pkl
@@ -37,5 +36,5 @@ num_processes: 8
 
 
 # encode config
-batch_size: 10000 # 4096
+batch_size: 4096 # 4096
 n_workers: 8 # 8

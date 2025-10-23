@@ -1,4 +1,6 @@
 import torch
+import einx
+from einops import rearrange, einsum
 from torch import nn
 
 
@@ -31,9 +33,10 @@ class RoPE(nn.Module):
     
     @staticmethod 
     def _init_cache(d_model: int, theta: float, max_seq_len: int) -> tuple[torch.Tensor, torch.Tensor]:
+        assert d_model % 2 == 0, "d_model must be even"
         inv_freq = 1 / (theta ** (torch.arange(0, d_model, 2).float() / d_model))  # [d/2]
         positions = torch.arange(max_seq_len, dtype=torch.float32)
-        angles = positions.unsqueeze(1) @ inv_freq.unsqueeze(0)  # [L, 1] x [1, d/2]
+        angles = einsum(positions, inv_freq, "l, d -> l d")  # [seq_len, d/2]
         cos = torch.cos(angles).repeat_interleave(2, -1)
         sin = torch.sin(angles).repeat_interleave(2, -1)
         return cos, sin
@@ -48,9 +51,9 @@ class RoPE(nn.Module):
         q_rotated = q * cos + rotate_half(q) * sin
         if k is not None:
             k_rotated = k * cos + rotate_half(k) * sin
-            return q_rotated, k_rotated
+            return q_rotated.contiguous(), k_rotated.contiguous()
         else:
-            return q_rotated
+            return q_rotated.contiguous()
         
     def get_FLOPS(self, ctx_len):  # for single k
         return 3 * ctx_len * self.d_model

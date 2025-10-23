@@ -120,7 +120,9 @@ def train_tokenizer(input_path: str | os.PathLike,
                     vocab_size: int,
                     special_tokens: list[str],
                     num_chunks: int = 4,
-                    num_process: int = 8) -> tuple[dict[int, bytes], list[tuple[bytes, bytes]]]:
+                    num_processes: int = 8) -> tuple[dict[int, bytes], list[tuple[bytes, bytes]]]:
+    if not os.path.exists(input_path):
+        raise FileExistsError(f"{input_path} not exist!")
     begin = time.time()
     
     # Step 1: Initialize Vocabulary
@@ -142,12 +144,12 @@ def train_tokenizer(input_path: str | os.PathLike,
     begin = middle
             
     # Step 3: Parallelizing Pre-tokenization and Counting
-    if num_process is None:
-        num_process = min(cpu_count(), 8)
-    num_process = min(num_process, len(chunk_args))
+    if num_processes is None:
+        num_processes = min(cpu_count(), 8)
+    num_processes = min(num_processes, len(chunk_args))
     word_freq = Counter()
-    with Pool(processes=num_process) as pool:
-        print(f"Starting pre-tokenization with {num_process} processes on {len(chunk_args)} chunks...")
+    with Pool(processes=num_processes) as pool:
+        print(f"Starting pre-tokenization with {num_processes} processes on {len(chunk_args)} chunks...")
         result_iter = pool.imap_unordered(worker, chunk_args)
         for counter in tqdm(result_iter, total=len(chunk_args), desc="Pre-tokenization", leave=True):
             word_freq.update(counter)
@@ -212,25 +214,25 @@ def train_tokenizer(input_path: str | os.PathLike,
 
 @hydra.main(config_path="configs", config_name="tokenizer", version_base=None)
 def main(cfg: DictConfig):
-    if cfg.mode == "train":
+    if not os.path.exists(cfg.merges_path) or not os.path.exists(cfg.vocab_path):
+        print(f"No vocab and mergers found in {cfg.merges_path} and {cfg.vocab_path}. Training a BPETokenizer.")
         start_time = time.time()
         vocab, merges = train_tokenizer(input_path=cfg.input_path,
                                         vocab_size=cfg.vocab_size,
                                         special_tokens=cfg.special_tokens,
-                                        num_chunks=cfg.n_workers,
-                                        num_process=cfg.n_workers)
+                                        num_chunks=cfg.num_chunks,
+                                        num_processes=cfg.num_processes)
         end_time = time.time()
         print(f"Finish training in {end_time - start_time:.2f}s")
         with open(cfg.vocab_path, "wb") as f:
             pickle.dump(vocab, f)
-        with open(cfg.merge_path, "wb") as f:
+        with open(cfg.merges_path, "wb") as f:
             pickle.dump(merges, f)
-    else:
-        tokenizer = BPETokenizer.from_files(vocab_path=cfg.vocab_path,
-                                            merges_path=cfg.merge_path,
-                                            special_tokens=cfg.special_tokens)
-        encode_to_nparray(tokenizer, cfg.train_txt_path, cfg.train_data_path, cfg.batch_size, cfg.n_workers)
-        encode_to_nparray(tokenizer, cfg.val_txt_path, cfg.val_data_path, cfg.batch_size, cfg.n_workers)
+    tokenizer = BPETokenizer.from_files(vocab_path=cfg.vocab_path,
+                                        merges_path=cfg.merges_path,
+                                        special_tokens=cfg.special_tokens)
+    encode_to_nparray(tokenizer, cfg.train_txt_path, cfg.train_dat_path, cfg.batch_size, cfg.n_workers)
+    encode_to_nparray(tokenizer, cfg.valid_txt_path, cfg.valid_dat_path, cfg.batch_size, cfg.n_workers)
     
 
 if __name__ == "__main__":

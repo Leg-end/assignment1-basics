@@ -2,9 +2,10 @@ import torch
 from torch import nn
 from .linear import Linear, Embedding
 from .RMSNorm import RMSNorm
-from .Attention import MultiHeadSelfAttention, softmax
+from .Attention import CasualMultiHeadSelfAttention, softmax
 from .SwiGLU import SwiGLU
 from .RoPE import RoPE
+from .Loss import cross_entropy_loss
 
 import os
 import json
@@ -19,7 +20,7 @@ class TransformerBlock(nn.Module):
                  pos_encoder: RoPE | None = None):
         super().__init__()
         self.ln1 = RMSNorm(d_model, eps=1e-5)
-        self.attn = MultiHeadSelfAttention(
+        self.attn = CasualMultiHeadSelfAttention(
             d_model,
             num_heads,
             pos_encoder=pos_encoder
@@ -90,8 +91,13 @@ class TransformerLM(nn.Module):
                  d_ff: int,
                  rope_theta: float | None = None):
         super().__init__()
+        self.config = {
+            k: v for k, v in locals().items() if k != "self" and not (k.startswith("__") and k.endswith("__"))
+        }
         self.d_model = d_model
         self.vocab_size = vocab_size
+        self.num_layers = num_layers
+        self.num_heads = num_heads
         self.context_length = context_length
         self.rope = RoPE(d_model // num_heads, rope_theta, context_length) if rope_theta is not None else None
         self.token_embeddings = Embedding(vocab_size, d_model)
@@ -107,14 +113,40 @@ class TransformerLM(nn.Module):
         self.ln_final = RMSNorm(d_model, 1e-6)
         self.lm_head = Linear(d_model, vocab_size)
         
-    def forward(self, x: torch.LongTensor) -> torch.Tensor:
+    @classmethod
+    def from_pretrained(cls, pretrained_model_path: str):
+        config_path = os.path.join(pretrained_model_path, "model_config.json")
+        with open(config_path) as f:
+            config = json.load(f)
+        print("Load with model config:")
+        print(config)
+        model = cls(**config)
+        
+        weight_path = os.path.join(pretrained_model_path, "model.pt")
+        state_dict = torch.load(weight_path)
+        
+        # Remove _orig_mod. prefix that comes from serializing a compiled model
+        unwanted_prefix = "_orig_mod."
+        for k, _ in list(state_dict.items()):
+            if k.startswith(unwanted_prefix):
+                state_dict[k[len(unwanted_prefix) :]] = state_dict.pop(k)
+        model.load_state_dict(state_dict)
+        return model
+        
+    def forward(self, x: torch.LongTensor, y: torch.LongTensor | None = None) -> torch.Tensor:
         x = x.to(torch.long)
         x = self.token_embeddings(x)
         for layer in self.layers:
             x = layer(x)
         x = self.ln_final(x)
-        output = self.lm_head(x)
-        return output
+        if y is not None:
+            logits = self.lm_head(x)
+            loss = cross_entropy_loss(logits.view(-1, self.vocab_size), y.view(-1))
+        else:
+            # inference-time mini-optimization: only forward the lm_head on the very last position
+            logits = self.lm_head(x[:, [-1], :])
+            loss = None
+        return logits, loss
     
     def get_num_params(self, non_embedding=True):
         n_param = sum(p.numel() for p in self.parameters() if p.requires_grad)
@@ -146,18 +178,18 @@ class TransformerLM(nn.Module):
         """
         if x.dim() == 1:
             x = x.unsqueeze(0)
-        
+
         ori_seq_len = x.size(-1)
         for _ in range(max_new_tokens):
             # Always padding left, thus model see meaning token at right side
             x = x[:, -self.context_length:] if x.size(1) > self.context_length else x
-            logits = self.forward(x)
-            next_token_logits = logits[:, -1]
+            logits, _ = self.forward(x)
+            next_token_logits = logits[:, -1, :]
             temp_scaled_next_token_logits = next_token_logits / temperature
             if top_k:
                 topk_values, _ = torch.topk(temp_scaled_next_token_logits,
                                             k=min(top_k, temp_scaled_next_token_logits.size(-1)))
-                threshold = topk_values[:, -1]
+                threshold = topk_values[:, [-1]]
                 topk_mask = temp_scaled_next_token_logits < threshold
                 temp_scaled_next_token_logits.masked_fill_(topk_mask, float("-inf"))
             next_token_prob = softmax(temp_scaled_next_token_logits, dim=-1)
@@ -189,12 +221,62 @@ class TransformerLM(nn.Module):
     
     
     def get_FLOPS(self):
-        flops = sum(layer.get_FLOPS(self.context_length) for layer in self.layers)
-        flops += self.ln_final.get_FLOPS(self.context_length)
-        flops += 2 * self.context_length * self.vocab_size * self.d_model
-        return flops
+        """
+        FLOPs: one multiplication or one addition is counted as 1 FLOP
+        Matmul FLOPs: including m * n * p multiplication and m * n * p addition, thus 2 * (m * n * p) FLOPs
+        calculate flops per token = 6 * N + 12 * L * H * Q * T
+            6 * N: matmul per token (for weights)
+                2 * N: forward matrix multiplication (one multiplication and one addition)
+                4 * N: backward matrix multiplication (grads to input and weights)
+                    e.g. Y = XW
+                    2N: dX = dY @ W.T
+                    2N: dW = X.T @ dY
+            12 * L * H * Q * T: self-attention flops T tokens (for tensors)
+                (Note that QKV and O projection already included in N params)
+                per head per layer:
+                    forward:
+                        A = QK^T: L * H * 2 * T * Q * T = 2 * T^2 * Q
+                        O = AV: L * H * 2 * T * T * Q = 2 * T^2 * Q
+                    backward:
+                        dQ = dA @ K; dK = Q.T @ dA: 4 * T^2 * Q
+                        dA = dO @ V.T; dV = A.T @ dO: 4 * T^2 * Q
+                    total: 12 * T^2 * Q
+                Total: 12 * L * H * T^2 * Q
+                Total per token = 12 * L * H * T^2 * Q / T = 12 * L * H * Q * T
+        """
+        N = self.get_num_params()
+        L, H, Q, T = self.num_layers, self.num_heads, self.d_model // self.num_heads, self.context_length
+        flops_per_token = 6 * N + 12 * L * H * Q * T
+        return flops_per_token * T
     
     
     def get_mem(self, dtype=torch.float16):
         unit = torch.finfo(dtype).bits // 8
         return self.get_num_params() * unit
+    
+    def get_MFU(self, fwdbwd_per_iter: int, dt: float) -> float:
+        """ estimate model flops utilization (MFU) in units of A100 bfloat16 peak FLOPS 
+        Args:
+            fwdbwd_per_iter: number of forward-backward passes per iteration
+            dt: time per iteration in seconds
+        Step 1:
+            calculate flops per token = 6 * N + 12 * L * H * Q * T
+        Step 2:
+            calculate flops per forward-backword iteration = (12LHQT + 6N) * T
+        Step 3:
+            calculate flops per iteration
+            Note that for gradient accumulation, we may have fwdbwd_per_iter = batch_size / accumulation_steps
+        Step 4:
+            calculate flops per second = flops per iteration / seconds per iteration
+        Step 5:
+            mfu = flops per second / A100 bfloat16 peak flops per seconds
+        """
+        # first estimate the number of flops we do per iteration.
+        # see PaLM paper Appendix B as ref: https://arxiv.org/abs/2204.02311
+        flops_per_fwdbwd = self.get_FLOPS()
+        flops_per_iter = flops_per_fwdbwd * fwdbwd_per_iter
+        # express our flops throughput as ratio of A100 bfloat16 peak flops
+        flops_achieved = flops_per_iter * (1.0/dt)  # per second
+        flops_promised = 312e12  # A100 GPU bfloat16 peak flops is 312 TFLOPS
+        mfu = flops_achieved / flops_promised
+        return mfu

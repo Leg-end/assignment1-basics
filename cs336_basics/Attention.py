@@ -1,5 +1,7 @@
 import torch
 import math
+import einx
+from einops import rearrange, einsum
 from torch import nn
 from .RoPE import RoPE
 from .linear import Linear
@@ -29,14 +31,14 @@ def scaled_dot_product_attention(
     """
     d_k = Q.shape[-1]
     Q = 1 / math.sqrt(d_k) * Q
-    A = torch.matmul(Q, K.transpose(-2, -1))
+    A = einsum(Q, K, "... queries d_k, ... keys d_k -> ... queries keys")
     if mask is not None:
         A = A.masked_fill(mask == 0, float('-inf'))
-    output = torch.matmul(softmax(A, -1), V)
+    output = einsum(softmax(A, -1), V, "... queries keys, ... keys d_v -> ... queries d_v")
     return output
 
 
-class MultiHeadSelfAttention(nn.Module):
+class CasualMultiHeadSelfAttention(nn.Module):
     
     def __init__(self,
                  d_model: int,
@@ -46,31 +48,38 @@ class MultiHeadSelfAttention(nn.Module):
         self.num_heads = num_heads
         self.d_model = d_model
         self.pos_encoder = pos_encoder
-        self.q_proj = Linear(d_model, d_model)
-        self.k_proj = Linear(d_model, d_model)
-        self.v_proj = Linear(d_model, d_model)
-        self.output_proj = Linear(d_model, d_model)
+        self.d_k = d_model // num_heads
+        self.q_proj = Linear(d_model, self.d_k * num_heads)
+        self.k_proj = Linear(d_model, self.d_k * num_heads)
+        self.v_proj = Linear(d_model, self.d_k * num_heads)
+        self.output_proj = Linear(d_model, self.d_k * num_heads)
         
     def forward(self, x: torch.Tensor, token_positions: torch.Tensor | None = None) -> torch.Tensor:
-        seq_len = x.shape[-2]
-        qkv_proj_weight = torch.concat([self.q_proj.weight, self.k_proj.weight, self.v_proj.weight])
-        qkv = x @ qkv_proj_weight.T
-        q, k, v = qkv.chunk(3, -1)
+        *b, seq_len, d_model = x.size()
+        assert d_model == self.d_model, f"d_model of input ({d_model}) should be equal to {self.d_model}"
+        Q = self.q_proj(x)
+        K = self.k_proj(x)
+        V = self.v_proj(x)
         
-        q = q.view(q.shape[:-1] + (self.num_heads, -1)).permute(0, 2, 1, 3)
-        k = k.view(k.shape[:-1] + (self.num_heads, -1)).permute(0, 2, 1, 3)
-        v = v.view(v.shape[:-1] + (self.num_heads, -1)).permute(0, 2, 1, 3)
-        
+        Q, K, V = (rearrange(X,  "... seq (heads d) -> ... heads seq d", heads=self.num_heads)
+                   for X in (Q, K, V))
+
         if self.pos_encoder is not None:
-            q, k = self.pos_encoder(q, k, token_positions)
+            if token_positions is None:
+                token_positions = einx.rearrange(
+                    "seq -> b... seq", torch.arange(seq_len, device=x.device), b = [1] * len(b))
+            # duplicate for each head
+            token_positions = rearrange(token_positions, "... seq -> ... 1 seq")
+            Q, K = self.pos_encoder(Q, K, token_positions)
         
-        # TODO pass as arg
-        casual_mask = torch.tril(torch.ones((seq_len, seq_len))).bool()
+        seq = torch.arange(seq_len, device=x.device)
+        qi = einx.rearrange('query -> b... 1 query 1', seq, b = [1] * len(b))
+        kj = einx.rearrange('key -> b... 1 1 key', seq, b = [1] * len(b))
+        casual_mask = qi >= kj
         
-        o = scaled_dot_product_attention(q, k, v, mask=casual_mask)
-        o = o.permute(0, 2, 1, 3).contiguous()
-        o = o.view(o.shape[:-2] + (self.d_model,))
-        output = self.output_proj(o)
+        O = scaled_dot_product_attention(Q, K, V, mask=casual_mask)
+        O = rearrange(O, "... heads seq d -> ... seq (heads d)").contiguous()
+        output = self.output_proj(O)
         return output
     
     def get_FLOPS(self, ctx_len):

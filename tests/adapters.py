@@ -12,13 +12,14 @@ from torch import Tensor
 
 from cs336_basics.linear import Linear, Embedding
 from cs336_basics.SwiGLU import SwiGLU, silu
-from cs336_basics.Attention import scaled_dot_product_attention, MultiHeadSelfAttention, softmax
+from cs336_basics.Attention import scaled_dot_product_attention, CasualMultiHeadSelfAttention, softmax
 from cs336_basics.RoPE import RoPE
 from cs336_basics.RMSNorm import RMSNorm
 from cs336_basics.Transformer import TransformerBlock, TransformerLM
 from cs336_basics.Loss import cross_entropy_loss
 from cs336_basics.Optimizer import AdamW
 from cs336_basics.Tokenizer import BPETokenizer
+from cs336_basics.nn_utils import clip_grad_norm
 from scripts.train_bpe_fast import train_tokenizer
 
 
@@ -154,7 +155,7 @@ def run_multihead_self_attention(
         Float[Tensor, " ... sequence_length d_out"]: Tensor with the output of running your optimized, batched multi-headed attention
         implementation with the given QKV projection weights and input features.
     """
-    attention = MultiHeadSelfAttention(d_model, num_heads)
+    attention = CasualMultiHeadSelfAttention(d_model, num_heads)
     attention.q_proj.weight.data.copy_(q_proj_weight)
     attention.k_proj.weight.data.copy_(k_proj_weight)
     attention.v_proj.weight.data.copy_(v_proj_weight)
@@ -200,7 +201,7 @@ def run_multihead_self_attention_with_rope(
         implementation with the given QKV projection weights and input features.
     """
     rope = RoPE(d_model // num_heads, theta, max_seq_len)
-    attention = MultiHeadSelfAttention(d_model, num_heads, pos_encoder=rope)
+    attention = CasualMultiHeadSelfAttention(d_model, num_heads, pos_encoder=rope)
     attention.q_proj.weight.data.copy_(q_proj_weight)
     attention.k_proj.weight.data.copy_(k_proj_weight)
     attention.v_proj.weight.data.copy_(v_proj_weight)
@@ -394,7 +395,7 @@ def run_transformer_lm(
                                    d_model=d_model, num_layers=num_layers,
                                    num_heads=num_heads, d_ff=d_ff, rope_theta=rope_theta)
     transformer_lm.load_state_dict(weights)
-    return transformer_lm(in_indices)
+    return transformer_lm(in_indices)[0]
 
 
 def run_rmsnorm(
@@ -456,10 +457,10 @@ def run_get_batch(
         is the sampled input sequences, and the second tuple item is the corresponding
         language modeling labels.
     """
-    starts = np.random.randint(0, len(dataset) - context_length - 1, (batch_size,))
+    starts = np.random.randint(0, len(dataset) - context_length, (batch_size,))
     inputs = np.stack([dataset[start: start + context_length] for start in starts])
     # next token labels are current token labels right shift by one offset
-    labels = np.stack([dataset[start+1: start + context_length+1] for start in starts])
+    labels = np.stack([dataset[start + 1: start + context_length + 1] for start in starts])
     
     return torch.from_numpy(inputs).to(device).long(), torch.from_numpy(labels).to(device).long()
 
@@ -505,20 +506,7 @@ def run_gradient_clipping(parameters: Iterable[torch.nn.Parameter], max_l2_norm:
 
     The gradients of the parameters (parameter.grad) should be modified in-place.
     """
-    parameters = [p for p in parameters if p.grad is not None]
-    if len(parameters) == 0:
-        return
-    # Calculate total L2 norm of all gradients, take all gradients as a single vector
-    # and compute its L2 norm by summing the squares of all gradients and then taking the square root.
-    total_norm = torch.sqrt(sum(torch.sum(p.grad.pow(2)) for p in parameters))
-    
-    # Calculate clipping coefficient
-    clip_coef = max_l2_norm / (total_norm + 1e-6)  # Add small value to avoid division by zero
-    
-    # If total norm exceeds max_norm, scale down all gradients
-    if clip_coef < 1.0:
-        for p in parameters:
-            p.grad.mul_(clip_coef)
+    clip_grad_norm(parameters, max_l2_norm=max_l2_norm)
 
 
 def get_adamw_cls() -> type[torch.optim.Optimizer]:

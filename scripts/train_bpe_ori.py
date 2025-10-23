@@ -161,7 +161,7 @@ def train_tokenizer(
     input_path: str | os.PathLike,
     vocab_size: int,
     special_tokens: list[str],
-    num_process: int = 4,
+    num_processes: int = 4,
     num_chunks: int = 4,
 ) -> tuple[dict[int, bytes], list[tuple[bytes, bytes]]]:
     """Given the path to an input corpus, run train a BPE tokenizer and
@@ -206,12 +206,12 @@ def train_tokenizer(
     begin = middle
             
     # Step 3: Parallelizing Pre-tokenization and Counting
-    if num_process is None:
-        num_process = min(cpu_count(), 8)
-    num_process = min(num_process, len(chunk_args))
+    if num_processes is None:
+        num_processes = min(cpu_count(), 8)
+    num_processes = min(num_processes, len(chunk_args))
     word_freq = Counter()
-    with Pool(processes=num_process) as pool:
-        print(f"Starting pre-tokenization with {num_process} processes on {len(chunk_args)} chunks...")
+    with Pool(processes=num_processes) as pool:
+        print(f"Starting pre-tokenization with {num_processes} processes on {len(chunk_args)} chunks...")
         result_iter = pool.imap_unordered(worker, chunk_args)
         for counter in tqdm(result_iter, total=len(chunk_args), desc="Pre-tokenization", leave=True):
             word_freq.update(counter)

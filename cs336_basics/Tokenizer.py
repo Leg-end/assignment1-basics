@@ -230,10 +230,11 @@ def encode_to_nparray_slow(tokenizer: BPETokenizer,
     tokens_mm.flush()
     
 
-def batch_tokenize(batch, tokenizer):
+def batch_tokenize(batch: list[str],
+                   tokenizer: BPETokenizer):
     out = []
     for line in batch:
-        out.append(tokenizer.encode(line))
+        out.extend(tokenizer.encode(line))
     return np.array(out, dtype=np.int32)
 
 
