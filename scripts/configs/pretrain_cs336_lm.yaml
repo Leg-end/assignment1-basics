@@ -16,11 +16,18 @@ training:
   train_data_path: ${dat_dir}/train.dat
   valid_data_path: ${dat_dir}/valid.dat
 
+  run_id: Pretrain-Baseline-LLM
+  seed: 1234
+  dtype: float32
+  compile: false
   save_path: "checkpoints/${exp_name}" # save path for both first train and resume train
   gpu_id: 7
   lr: 0.0005
   min_lr: 0.0001
   weight_decay: 0.01
+  beta1: 0.9
+  beta2: 0.999
+  eps: 1e-8
   batch_size: 32
   context_length: 256
   train_steps: 5000
@@ -31,6 +38,7 @@ training:
   val_batches: 20
   save_interval: 1000
   resume_checkpoint: null   # load checkpoint from current hydra run dir
+  gradient_accumulation_steps: 1
 
 model_type: cs336_lm
 model:

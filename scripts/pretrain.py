@@ -43,22 +43,46 @@ def val_batch_iter(memmap: np.ndarray, batch_size: int, context_length: int, dev
         yield torch.tensor(x).to(device).long(), torch.tensor(y).to(device).long()
         
 
+def setup_hydra_output_for_distributed():
+    """在Hydra初始化前调用此函数"""
+    # 判断当前进程是否是rank 0
+    if dist.is_available() and dist.is_initialized():
+        is_rank_zero = dist.get_rank() == 0
+    else:
+        is_rank_zero = int(os.environ.get('RANK', 0)) == 0
+    
+    # 如果不是rank 0，设置环境变量禁用Hydra输出
+    if not is_rank_zero:
+        os.environ['HYDRA_FULL_ERROR'] = '0'  # 减少错误输出
+        # 重定向输出到空设备
+        os.environ['HYDRA_OUTPUT'] = 'null'
+    else:
+        logger.info("Rank 0 process, enabling Hydra output")
+        
+
 def get_experiment(run_id: str,
                    project_name: str,
                    workspace: str,
+                   resume: bool,
+                   is_master_process: bool,
                    api_key:str="SJASztLoOjQpW2Sakl2PDV4YZ"):
     experiment_id = hashlib.sha1(run_id.encode("utf-8")).hexdigest()
     os.environ["COMET_EXPERIMENT_KEY"] = experiment_id
-
+    if is_master_process and not resume:  # always create a new experiment if not resuming
+        return comet.start(api_key=api_key,
+                           workspace=workspace,
+                           project_name=project_name,
+                           experiment_key=experiment_id)
     api = comet.API(api_key=api_key)  # Assumes API key is set in config/env
-    api_experiment = api.get_experiment_by_id(experiment_id)
+    api_experiment = api.get_experiment_by_key(experiment_id)
 
     if api_experiment is None:
         return comet.Experiment(project_name=project_name,
-                                workspace=workspace)
-
+                                workspace=workspace,
+                                api_key=api_key)
     else:
-        return comet.ExistingExperiment(project_name=project_name)
+        return comet.ExistingExperiment(project_name=project_name,
+                                        api_key=api_key)
     
 def load_checkpoint_dist(resume_checkpoint: int,
                          save_path: str,
@@ -100,6 +124,7 @@ def train(model: torch.nn.Module,
         ddp_local_rank = int(os.environ['LOCAL_RANK'])
         ddp_world_size = int(os.environ['WORLD_SIZE'])
         torch_device = f"cuda:{ddp_local_rank}"
+        device = "cuda"  # model will be moved to CUDA device in current GPU
         torch.cuda.set_device(torch_device)
         seed = args.seed + ddp_rank  # each process gets a different seed
         # Rank 0 does logging, file creation, etc.
@@ -108,16 +133,17 @@ def train(model: torch.nn.Module,
             logger.info("Using DDP")
     else:
         seed = args.seed
-        ddp_word_size = 1
+        ddp_world_size = 1
         is_master_process = True
         
     if is_master_process:
         logger.info(
             "Total number of tokens per training step: "
             + str(
-                ddp_world_size
+                args.gradient_accumulation_steps
+                * ddp_world_size
                 * args.batch_size
-                * model.context_length
+                * args.context_length
             )
         )
     # Seed each process differently so we can be sure that they
@@ -125,10 +151,6 @@ def train(model: torch.nn.Module,
     # NOTE: This assumes that you're using torch RNG, you may have
     # to seed numpy too as well if your code uses numpy random functions.
     torch.manual_seed(seed)
-    
-    if is_master_process:
-        # TODO control hydra writing only do in GPU 0
-        pass
     
     torch_dtype = {
         "float32": torch.float32,
@@ -172,11 +194,13 @@ def train(model: torch.nn.Module,
                                 weight_decay=args.weight_decay)
     # Resume from checkpoint
     start_iter = 0
-    if is_master_process:
-        comet.login()
+    # if is_master_process:
+    #     comet.login()
     experiment = get_experiment(run_id=args.run_id,
                                 project_name="Pretrain",
                                 workspace="leg-end",
+                                resume=args.resume_checkpoint,
+                                is_master_process=is_master_process,
                                 api_key="SJASztLoOjQpW2Sakl2PDV4YZ")
                                  
     if args.resume_checkpoint:
@@ -192,7 +216,6 @@ def train(model: torch.nn.Module,
     # Training loop
     
     pbar = tqdm(range(start_iter, args.train_steps), desc="Training", leave=False, disable=not is_master_process)
-    x, y = run_get_batch(train_dataset, args.batch_size, args.context_length, device)
     for step in pbar:
         lr = run_get_lr_cosine_schedule(
             step, args.lr, args.min_lr, args.warmup_iters, args.cosine_iters
@@ -207,10 +230,9 @@ def train(model: torch.nn.Module,
                 model.require_backward_grad_sync = micro_step == args.gradient_accumulation_steps - 1
             
             with amp_ctx:
-                logits, loss = model(x, y)
-                loss /= args.gradient_accumulation_steps
-                
                 x, y = run_get_batch(train_dataset, args.batch_size, args.context_length, device)
+                logits, loss = model(x, y)
+                loss = loss / args.gradient_accumulation_steps
         
             loss.backward()
         gnorm = clip_grad_norm(model.parameters(), args.clip_grad_norm)
@@ -218,7 +240,7 @@ def train(model: torch.nn.Module,
         optimizer.step()
         optimizer.zero_grad(set_to_none=True)
         
-        loss_float = loss.item() * args.training.gradient_accumulation_steps
+        loss_float = loss.item() * args.gradient_accumulation_steps
         ppl_float = math.exp(loss_float)
         experiment.log_metric("gradient_norm", gnorm.item(), step=step)
         experiment.log_metric("loss", loss_float, step=step)
@@ -260,9 +282,9 @@ def train(model: torch.nn.Module,
             ckpt_name = os.path.join(args.save_path, f"ckpt_iter{step+1}.pt")
             run_save_checkpoint(model, optimizer, step+1, ckpt_name)
             logger.info(f"Checkpoint saved to {ckpt_name}")
-    experiment.end()
     if is_ddp:
         destroy_process_group()
+    experiment.end()
     
     
 @torch.no_grad()
@@ -287,7 +309,7 @@ def evaluate(model: BasicsTransformerLM,
 
 @torch.no_grad()
 def inference(
-    model: BasicsTransformerLM,
+    model: BasicsTransformerLM | DDP,
     tokenizer: BPETokenizer,
     device: str | torch.device,
     prompt: str,
@@ -296,6 +318,8 @@ def inference(
     top_k: int,
     eos_token_id: int
 ) -> str:
+    if isinstance(model, DDP):
+        model = model.module
     input_ids = tokenizer.encode(prompt)
     input_tensor = torch.tensor([input_ids], device=device).to(torch.int64)
     output_tokens = model.generate(
@@ -347,4 +371,5 @@ def main(cfg: DictConfig):
     
 
 if __name__ == "__main__":
+    setup_hydra_output_for_distributed()
     main()
