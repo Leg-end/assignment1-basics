@@ -3,7 +3,7 @@ import math
 import einx
 from einops import rearrange, einsum
 from torch import nn
-from .RoPE import RoPE
+from .RoPE import RotaryEmbedding
 from .linear import Linear
 
 
@@ -30,10 +30,9 @@ def scaled_dot_product_attention(
         Float[Tensor, " ... queries d_v"]: Output of SDPA
     """
     d_k = Q.shape[-1]
-    Q = 1 / math.sqrt(d_k) * Q
-    A = einsum(Q, K, "... queries d_k, ... keys d_k -> ... queries keys")
+    A = einsum(Q, K, "... queries d_k, ... keys d_k -> ... queries keys") / math.sqrt(d_k)
     if mask is not None:
-        A = A.masked_fill(mask == 0, float('-inf'))
+        A = torch.where(mask, A, float('-inf'))
     output = einsum(softmax(A, -1), V, "... queries keys, ... keys d_v -> ... queries d_v")
     return output
 
@@ -43,8 +42,9 @@ class CasualMultiHeadSelfAttention(nn.Module):
     def __init__(self,
                  d_model: int,
                  num_heads: int,
-                 pos_encoder: RoPE | None = None):
+                 pos_encoder: RotaryEmbedding | None = None):
         super().__init__()
+        assert d_model % num_heads == 0, "d_model should be divisible by num_heads"
         self.num_heads = num_heads
         self.d_model = d_model
         self.pos_encoder = pos_encoder
@@ -52,7 +52,7 @@ class CasualMultiHeadSelfAttention(nn.Module):
         self.q_proj = Linear(d_model, self.d_k * num_heads)
         self.k_proj = Linear(d_model, self.d_k * num_heads)
         self.v_proj = Linear(d_model, self.d_k * num_heads)
-        self.output_proj = Linear(d_model, self.d_k * num_heads)
+        self.output_proj = Linear(self.d_k * num_heads, d_model)
         
     def forward(self, x: torch.Tensor, token_positions: torch.Tensor | None = None) -> torch.Tensor:
         *b, seq_len, d_model = x.size()
@@ -70,7 +70,9 @@ class CasualMultiHeadSelfAttention(nn.Module):
                     "seq -> b... seq", torch.arange(seq_len, device=x.device), b = [1] * len(b))
             # duplicate for each head
             token_positions = rearrange(token_positions, "... seq -> ... 1 seq")
-            Q, K = self.pos_encoder(Q, K, token_positions)
+            # Q, K = self.pos_encoder(Q, K, token_positions)
+            Q = self.pos_encoder(Q, token_positions)
+            K = self.pos_encoder(K, token_positions)
         
         seq = torch.arange(seq_len, device=x.device)
         qi = einx.rearrange('query -> b... 1 query 1', seq, b = [1] * len(b))
@@ -78,7 +80,7 @@ class CasualMultiHeadSelfAttention(nn.Module):
         casual_mask = qi >= kj
         
         O = scaled_dot_product_attention(Q, K, V, mask=casual_mask)
-        O = rearrange(O, "... heads seq d -> ... seq (heads d)").contiguous()
+        O = rearrange(O, "batch heads seq d -> batch seq (heads d)").contiguous()
         output = self.output_proj(O)
         return output
     

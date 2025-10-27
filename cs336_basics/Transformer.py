@@ -1,14 +1,18 @@
 import torch
+import logging
 from torch import nn
 from .linear import Linear, Embedding
 from .RMSNorm import RMSNorm
 from .Attention import CasualMultiHeadSelfAttention, softmax
 from .SwiGLU import SwiGLU
-from .RoPE import RoPE
+from .RoPE import RotaryEmbedding
 from .Loss import cross_entropy_loss
+from torch.nn import functional as F
 
 import os
 import json
+
+logger = logging.getLogger(__name__)
 
 
 class TransformerBlock(nn.Module):
@@ -17,15 +21,15 @@ class TransformerBlock(nn.Module):
                  d_model: int,
                  num_heads: int,
                  d_ff: int,
-                 pos_encoder: RoPE | None = None):
+                 pos_encoder: RotaryEmbedding | None = None):
         super().__init__()
-        self.ln1 = RMSNorm(d_model, eps=1e-5)
+        self.ln1 = RMSNorm(d_model)
         self.attn = CasualMultiHeadSelfAttention(
             d_model,
             num_heads,
             pos_encoder=pos_encoder
         )
-        self.ln2 = RMSNorm(d_model, eps=1e-5)
+        self.ln2 = RMSNorm(d_model)
         self.ffn = SwiGLU(d_model, d_ff)
         
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -41,7 +45,7 @@ class TransformerBlock(nn.Module):
             + self.ln2.get_FLOPS(ctx_len) + self.ffn.get_FLOPS(ctx_len)
     
     
-class TransformerLM(nn.Module):
+class BasicsTransformerLM(nn.Module):
     """
     Memory allocation:
         Model Parameters (P)
@@ -99,7 +103,7 @@ class TransformerLM(nn.Module):
         self.num_layers = num_layers
         self.num_heads = num_heads
         self.context_length = context_length
-        self.rope = RoPE(d_model // num_heads, rope_theta, context_length) if rope_theta is not None else None
+        self.rope = RotaryEmbedding(d_model // num_heads, rope_theta, context_length) if rope_theta is not None else None
         self.token_embeddings = Embedding(vocab_size, d_model)
         self.layers = nn.ModuleList([
             TransformerBlock(
@@ -110,31 +114,13 @@ class TransformerLM(nn.Module):
             )
             for _ in range(num_layers)
         ])
-        self.ln_final = RMSNorm(d_model, 1e-6)
+        self.ln_final = RMSNorm(d_model)
         self.lm_head = Linear(d_model, vocab_size)
         
-    @classmethod
-    def from_pretrained(cls, pretrained_model_path: str):
-        config_path = os.path.join(pretrained_model_path, "model_config.json")
-        with open(config_path) as f:
-            config = json.load(f)
-        print("Load with model config:")
-        print(config)
-        model = cls(**config)
+        # report number of parameters
+        logger.info(f"number of non-embedding parameters: {self.get_num_params() / 1e6:.2f}M")
         
-        weight_path = os.path.join(pretrained_model_path, "model.pt")
-        state_dict = torch.load(weight_path)
-        
-        # Remove _orig_mod. prefix that comes from serializing a compiled model
-        unwanted_prefix = "_orig_mod."
-        for k, _ in list(state_dict.items()):
-            if k.startswith(unwanted_prefix):
-                state_dict[k[len(unwanted_prefix) :]] = state_dict.pop(k)
-        model.load_state_dict(state_dict)
-        return model
-        
-    def forward(self, x: torch.LongTensor, y: torch.LongTensor | None = None) -> torch.Tensor:
-        x = x.to(torch.long)
+    def forward(self, x: torch.IntTensor, y: torch.IntTensor | None = None) -> tuple[torch.Tensor, torch.Tensor | None]:
         x = self.token_embeddings(x)
         for layer in self.layers:
             x = layer(x)
@@ -149,10 +135,11 @@ class TransformerLM(nn.Module):
         return logits, loss
     
     def get_num_params(self, non_embedding=True):
-        n_param = sum(p.numel() for p in self.parameters() if p.requires_grad)
+        n_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
         if non_embedding:
-            non_embedding -= self.lm_head.weight.numel()
-        return n_param
+            n_params -= self.token_embeddings.weight.numel()
+            n_params -= self.lm_head.weight.numel()
+        return n_params
     
     @torch.no_grad()
     def generate(self,
@@ -184,12 +171,12 @@ class TransformerLM(nn.Module):
             # Always padding left, thus model see meaning token at right side
             x = x[:, -self.context_length:] if x.size(1) > self.context_length else x
             logits, _ = self.forward(x)
-            next_token_logits = logits[:, -1, :]
+            next_token_logits = logits[:, -1]
             temp_scaled_next_token_logits = next_token_logits / temperature
             if top_k:
                 topk_values, _ = torch.topk(temp_scaled_next_token_logits,
                                             k=min(top_k, temp_scaled_next_token_logits.size(-1)))
-                threshold = topk_values[:, [-1]]
+                threshold = topk_values[:, -1]
                 topk_mask = temp_scaled_next_token_logits < threshold
                 temp_scaled_next_token_logits.masked_fill_(topk_mask, float("-inf"))
             next_token_prob = softmax(temp_scaled_next_token_logits, dim=-1)
@@ -214,8 +201,9 @@ class TransformerLM(nn.Module):
         # Remove _orig_mod. prefix that comes from serializing a compiled model
         unwanted_prefix = "_orig_mod."
         for k, _ in list(state_dict.items()):
-            if k.startswith(unwanted_prefix):
-                state_dict[k[len(unwanted_prefix) :]] = state_dict.pop(k)
+            unwanted_prefix_start_idx = k.find(unwanted_prefix)
+            if unwanted_prefix_start_idx != -1:
+                state_dict[k[unwanted_prefix_start_idx + len(unwanted_prefix) :]] = state_dict.pop(k)
         model.load_state_dict(state_dict)
         return model
     

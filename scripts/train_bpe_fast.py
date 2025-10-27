@@ -9,6 +9,7 @@ from tqdm import tqdm
 
 import hydra
 import pickle
+import tiktoken
 from omegaconf import DictConfig
                 
 
@@ -231,6 +232,8 @@ def main(cfg: DictConfig):
     tokenizer = BPETokenizer.from_files(vocab_path=cfg.vocab_path,
                                         merges_path=cfg.merges_path,
                                         special_tokens=cfg.special_tokens)
+    # tokenizer = tiktoken.get_encoding("gpt2")
+    print(tokenizer.vocab_size)
     encode_to_nparray(tokenizer, cfg.train_txt_path, cfg.train_dat_path, cfg.batch_size, cfg.n_workers)
     encode_to_nparray(tokenizer, cfg.valid_txt_path, cfg.valid_dat_path, cfg.batch_size, cfg.n_workers)
     

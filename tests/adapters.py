@@ -13,9 +13,9 @@ from torch import Tensor
 from cs336_basics.linear import Linear, Embedding
 from cs336_basics.SwiGLU import SwiGLU, silu
 from cs336_basics.Attention import scaled_dot_product_attention, CasualMultiHeadSelfAttention, softmax
-from cs336_basics.RoPE import RoPE
+from cs336_basics.RoPE import RotaryEmbedding
 from cs336_basics.RMSNorm import RMSNorm
-from cs336_basics.Transformer import TransformerBlock, TransformerLM
+from cs336_basics.Transformer import TransformerBlock, BasicsTransformerLM
 from cs336_basics.Loss import cross_entropy_loss
 from cs336_basics.Optimizer import AdamW
 from cs336_basics.Tokenizer import BPETokenizer
@@ -200,7 +200,7 @@ def run_multihead_self_attention_with_rope(
         Float[Tensor, " ... sequence_length d_out"]: Tensor with the output of running your optimized, batched multi-headed attention
         implementation with the given QKV projection weights and input features.
     """
-    rope = RoPE(d_model // num_heads, theta, max_seq_len)
+    rope = RotaryEmbedding(d_model // num_heads, theta, max_seq_len)
     attention = CasualMultiHeadSelfAttention(d_model, num_heads, pos_encoder=rope)
     attention.q_proj.weight.data.copy_(q_proj_weight)
     attention.k_proj.weight.data.copy_(k_proj_weight)
@@ -228,8 +228,8 @@ def run_rope(
     Returns:
         Float[Tensor, " ... sequence_length d_k"]: Tensor with RoPEd input.
     """
-    rope = RoPE(d_k, theta, max_seq_len)
-    return rope(in_query_or_key, token_positions=token_positions)
+    rope = RotaryEmbedding(d_k, theta, max_seq_len)
+    return rope(in_query_or_key, pos_ids=token_positions)
 
 
 def run_transformer_block(
@@ -302,7 +302,7 @@ def run_transformer_block(
         Float[Tensor, "batch sequence_length d_model"] Tensor with the output of
         running the Transformer block on the input features while using RoPE.
     """
-    rope = RoPE(d_model // num_heads, theta, max_seq_len)
+    rope = RotaryEmbedding(d_model // num_heads, theta, max_seq_len)
     transformer = TransformerBlock(d_model,
                               num_heads,
                               d_ff,
@@ -390,7 +390,7 @@ def run_transformer_lm(
         Float[Tensor, "batch_size sequence_length vocab_size"]: Tensor with the predicted unnormalized
         next-word distribution for each token.
     """
-    transformer_lm = TransformerLM(vocab_size=vocab_size,
+    transformer_lm = BasicsTransformerLM(vocab_size=vocab_size,
                                    context_length=context_length,
                                    d_model=d_model, num_layers=num_layers,
                                    num_heads=num_heads, d_ff=d_ff, rope_theta=rope_theta)
@@ -457,12 +457,24 @@ def run_get_batch(
         is the sampled input sequences, and the second tuple item is the corresponding
         language modeling labels.
     """
-    starts = np.random.randint(0, len(dataset) - context_length, (batch_size,))
-    inputs = np.stack([dataset[start: start + context_length] for start in starts])
-    # next token labels are current token labels right shift by one offset
-    labels = np.stack([dataset[start + 1: start + context_length + 1] for start in starts])
-    
-    return torch.from_numpy(inputs).to(device).long(), torch.from_numpy(labels).to(device).long()
+    starting_idxs = torch.randint(len(dataset) - context_length, (batch_size,))
+    x = torch.stack([
+            torch.from_numpy((dataset[i : i + context_length]).astype(np.int64))
+            for i in starting_idxs
+    ])  # fmt: skip
+    y = torch.stack(
+        [
+            torch.from_numpy((dataset[i + 1 : i + 1 + context_length]).astype(np.int64))
+            for i in starting_idxs
+        ]
+    )  # fmt: skip
+    if "cuda" in str(device):
+        x = x.pin_memory().to(device, non_blocking=True)
+        y = y.pin_memory().to(device, non_blocking=True)
+    else:
+        x = x.to(device)
+        y = y.to(device)
+    return x, y
 
 
 def run_softmax(in_features: Float[Tensor, " ..."], dim: int) -> Float[Tensor, " ..."]:
@@ -602,11 +614,37 @@ def run_load_checkpoint(
     """
     if isinstance(src, (str, os.PathLike)):
         with open(src, 'rb') as f:
-            checkpoint = torch.load(f)
+            # Loading to CPU in case of GPU memory issues
+            checkpoint = torch.load(f, map_location='cpu')
     else:
-        checkpoint = torch.load(src)
-    model.load_state_dict(checkpoint['model'])
-    optimizer.load_state_dict(checkpoint['optimizer'])
+        checkpoint = torch.load(src, map_location='cpu')
+    model_state_dict = checkpoint['model']
+    if  isinstance(model, torch.nn.parallel.DistributedDataParallel):
+        if not any(key.startswith('module.') for key in model_state_dict.keys()):
+            from collections import OrderedDict
+            new_state_dict = OrderedDict()
+            for k, v in model_state_dict.items():
+                new_state_dict['module.' + k] = v
+            model_state_dict = new_state_dict
+    else:
+        if any(key.startswith('module.') for key in model_state_dict.keys()):
+            from collections import OrderedDict
+            new_state_dict = OrderedDict()
+            for k, v in model_state_dict.items():
+                if k.startswith('module.'):
+                    name = k[7:]  # remove `module.`
+                else:
+                    name = k
+                new_state_dict[name] = v
+            model_state_dict = new_state_dict
+    model.load_state_dict(model_state_dict)
+    # Move optimizer state to device of model parameters
+    optimizer_state_dict = checkpoint['optimizer']
+    for state in optimizer_state_dict['state'].values():
+        for k, v in state.items():
+            if torch.is_tensor(v):
+                state[k] = v.to(device=next(model.parameters()).device)
+    optimizer.load_state_dict(optimizer_state_dict)
     iteration = checkpoint['iteration']
     return iteration
 
