@@ -271,8 +271,7 @@ def train(model: torch.nn.Module,
                 prompt="Tom and Lily were friends.",  # args.prompt
                 max_new_tokens=64,
                 temperature=1.0,
-                top_k=50,
-                eos_token_id=tokenizer.eos_token_id
+                top_k=50
             )
             msg = f"Input: Tom and Lily were friends.\nOutput: {gen_response}"
             experiment.log_text(msg, step=step)
@@ -316,7 +315,6 @@ def inference(
     max_new_tokens: int,
     temperature: float,
     top_k: int,
-    eos_token_id: int
 ) -> str:
     if isinstance(model, DDP):
         model = model.module
@@ -327,17 +325,20 @@ def inference(
         max_new_tokens=max_new_tokens,
         temperature=temperature,
         top_k=top_k,
-        eos_token_id=eos_token_id
+        eos_token_id=tokenizer.eos_token_id
     )
     output_ids = output_tokens[0].cpu().numpy().tolist()
+    logger.info(f"[maximum new tokens: {max_new_tokens}] Generated {len(output_ids)} tokens")
     full_ids = input_ids + output_ids
     text = tokenizer.decode(full_ids)
     return text
         
 
-@hydra.main(config_path="configs/", config_name="pretrain_cs336_lm", version_base=None)
+@hydra.main(config_path="configs/", config_name="evaluate_cs336_lm", version_base=None)
 def main(cfg: DictConfig):
-    model_config, running_config, tokenizer_config = cfg.model, cfg.training, cfg.tokenizer
+    training = hasattr(cfg, "training")
+    model_config, tokenizer_config = cfg.model, cfg.tokenizer
+    running_config = cfg.training if training else cfg.eval
     tokenizer = BPETokenizer.from_files(**tokenizer_config)
     print(f"vocab size: {tokenizer.vocab_size}")
     model = BasicsTransformerLM(**model_config)
@@ -349,25 +350,25 @@ def main(cfg: DictConfig):
     else:
         device = "cpu"
     
-    if hasattr(cfg, "training"):
+    if training:
         train(model, device, running_config, tokenizer)
-    elif hasattr(cfg, "eval"):
-        with open(os.path.join(running_config.save_path, f"ckpt_iter{running_config.iteration}.pt"), 'rb') as f:
-            checkpoint = torch.load(f, weights_only=False)
-        model.load_state_dict(checkpoint['model'])
-        
-        gen_response = evaluate(
+    else:
+        torch.manual_seed(running_config.seed)
+        model = model.to(device)
+        model.eval()
+        ckpt_path = os.path.join(running_config.save_path, f"ckpt_iter{running_config.iteration}.pt")
+        iteration = run_load_checkpoint(ckpt_path, model)
+        logger.info(f"Loading from checkpoint {iteration} from path {ckpt_path}")
+        gen_response = inference(
             model=model,
             tokenizer=tokenizer,
             device=device,
             prompt=running_config.prompt,
             max_new_tokens=running_config.max_new_tokens,
             temperature=running_config.temperature,
-            top_k=running_config.top_k,
-            eos_token_id=tokenizer.eos_token_id
+            top_k=running_config.top_k
         )
-        print("Input: ", running_config.prompt)
-        print("Output: ", gen_response)
+        logger.info(f"Input: {running_config.prompt}\nOutput: {gen_response}")
     
 
 if __name__ == "__main__":

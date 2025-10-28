@@ -16,7 +16,7 @@ training:
   train_data_path: ${dat_dir}/train.dat
   valid_data_path: ${dat_dir}/valid.dat
 
-  run_id: Pretrain-Baseline-LLM
+  run_id: Pretrain-Baseline-LLM-Post-Norm
   seed: 1234
   dtype: float32
   compile: false

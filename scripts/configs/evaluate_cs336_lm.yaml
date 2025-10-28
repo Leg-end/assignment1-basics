@@ -8,11 +8,12 @@ vocab_size_map:
   owt: 32_000
 
 eval:
+  seed: 1234
   save_path: checkpoints/cs336_lm_TinyStories/
-  gpu_id: 4
+  gpu_id: 7
   iteration: 5000
-  prompt: Tom and Lily were friends.
-  max_new_tokens: 64
+  prompt: Once upon a time, there was a pretty girl named Lily.
+  max_new_tokens: 1024  # 256 * 4
   temperature: 1.0
   top_k: 50
 
@@ -20,6 +21,7 @@ model_type: cs336_lm
 model:
   vocab_size: ${vocab_size_map.${dataset_name}}
   context_length: 256
+  context_scale: 4
   d_model: 512
   num_layers: 4
   num_heads: 16

@@ -34,9 +34,14 @@ class TransformerBlock(nn.Module):
         
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # pre-norm: so that it doesn't affect the main residual signal path
-        y = x + self.attn(self.ln1(x))
+        # y = x + self.attn(self.ln1(x))
         
-        output = y + self.ffn(self.ln2(y))
+        # output = y + self.ffn(self.ln2(y))
+        
+        # post-norm: hard to train, but learn more robust representations
+        y = self.ln1(x + self.attn(x))
+        
+        output = self.ln2(y + self.ffn(y))
         
         return output
     
@@ -93,6 +98,7 @@ class BasicsTransformerLM(nn.Module):
                  num_layers: int,
                  num_heads: int,
                  d_ff: int,
+                 context_scale: int=1,
                  rope_theta: float | None = None):
         super().__init__()
         self.config = {
@@ -103,7 +109,8 @@ class BasicsTransformerLM(nn.Module):
         self.num_layers = num_layers
         self.num_heads = num_heads
         self.context_length = context_length
-        self.rope = RotaryEmbedding(d_model // num_heads, rope_theta, context_length) if rope_theta is not None else None
+        self.rope = RotaryEmbedding(d_model // num_heads, rope_theta, context_length,
+                                    context_scale=context_scale) if rope_theta is not None else None
         self.token_embeddings = Embedding(vocab_size, d_model)
         self.layers = nn.ModuleList([
             TransformerBlock(

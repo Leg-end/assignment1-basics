@@ -1,29 +1,44 @@
 import torch
 import einx
+import logging
 from einops import rearrange, einsum
 from torch import nn, Tensor
 from jaxtyping import Float, Int
+# For NTK-aware RoPE, please refer to https://spaces.ac.cn/archives/9675
+# or https://zhuanlan.zhihu.com/p/8306958113
 
+logger = logging.getLogger(__name__)
 
 class RotaryEmbedding(nn.Module):
     def __init__(self,
                  d_model: int,
                  theta: float,
                  context_length: int,
+                 context_scale: int=1,  # expand context length when inference using NTK-aware RoPE
                  device: torch.device | None=None):
         super().__init__()
         self.device = device
         self.d_model = d_model
+        self.context_length = context_length
+        self.context_scale = context_scale
+        self.theta = theta
         self.register_buffer(
             "_freq_cis_cache",
-            RotaryEmbedding._init_cache(context_length, d_model, theta).to(device), persistent=False
+            RotaryEmbedding._init_cache(
+                context_length, d_model, theta, context_scale).to(device), persistent=False
         )
+        
     
     @staticmethod
-    def _init_cache(context_length: int, dim: int, theta: float) -> Float[Tensor, " 2 context_length half_dim"]:
+    def _init_cache(context_length: int, dim: int, theta: float, context_scale: int = 1) -> Float[Tensor, " 2 context_length half_dim"]:
         assert dim % 2 == 0
 
         d = torch.arange(0, dim, 2) / dim
+        if context_scale > 1:  
+            # NTK-aware RoPE: theta = theta * lambda, lambda = context_scale ** (dim / (dim - 2)) or context_scale ** (2 / (dim - 2))
+            logger.info(f"Expanding context length with {context_scale} scales. NTK-aware RoPE applied.")
+            lmbd = context_scale ** (dim / (dim - 2))
+            theta = theta * lmbd
         freqs = theta ** -d
         t = torch.arange(context_length)
 

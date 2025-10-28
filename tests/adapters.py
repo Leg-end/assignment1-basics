@@ -597,7 +597,7 @@ def run_save_checkpoint(
 def run_load_checkpoint(
     src: str | os.PathLike | BinaryIO | IO[bytes],
     model: torch.nn.Module,
-    optimizer: torch.optim.Optimizer,
+    optimizer: torch.optim.Optimizer | None = None,
 ):
     """
     Given a serialized checkpoint (path or file-like object), restore the
@@ -615,9 +615,9 @@ def run_load_checkpoint(
     if isinstance(src, (str, os.PathLike)):
         with open(src, 'rb') as f:
             # Loading to CPU in case of GPU memory issues
-            checkpoint = torch.load(f, map_location='cpu')
+            checkpoint = torch.load(f, map_location='cpu', weights_only=False)
     else:
-        checkpoint = torch.load(src, map_location='cpu')
+        checkpoint = torch.load(src, map_location='cpu', weights_only=False)
     model_state_dict = checkpoint['model']
     if  isinstance(model, torch.nn.parallel.DistributedDataParallel):
         if not any(key.startswith('module.') for key in model_state_dict.keys()):
@@ -638,13 +638,14 @@ def run_load_checkpoint(
                 new_state_dict[name] = v
             model_state_dict = new_state_dict
     model.load_state_dict(model_state_dict)
-    # Move optimizer state to device of model parameters
-    optimizer_state_dict = checkpoint['optimizer']
-    for state in optimizer_state_dict['state'].values():
-        for k, v in state.items():
-            if torch.is_tensor(v):
-                state[k] = v.to(device=next(model.parameters()).device)
-    optimizer.load_state_dict(optimizer_state_dict)
+    if optimizer is not None:
+        # Move optimizer state to device of model parameters
+        optimizer_state_dict = checkpoint['optimizer']
+        for state in optimizer_state_dict['state'].values():
+            for k, v in state.items():
+                if torch.is_tensor(v):
+                    state[k] = v.to(device=next(model.parameters()).device)
+        optimizer.load_state_dict(optimizer_state_dict)
     iteration = checkpoint['iteration']
     return iteration
 
