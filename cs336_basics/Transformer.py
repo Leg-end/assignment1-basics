@@ -1,6 +1,8 @@
 import torch
 import logging
+from typing import Callable, AsyncGenerator, Union, Optional
 from torch import nn
+from .Tokenizer import BPETokenizer
 from .linear import Linear, Embedding
 from .RMSNorm import RMSNorm
 from .Attention import CasualMultiHeadSelfAttention, softmax
@@ -8,9 +10,10 @@ from .SwiGLU import SwiGLU
 from .RoPE import RotaryEmbedding
 from .Loss import cross_entropy_loss
 from torch.nn import functional as F
-
+from langchain_core.language_models.llms import LLM
 import os
 import json
+import asyncio
 
 logger = logging.getLogger(__name__)
 
@@ -32,14 +35,16 @@ class TransformerBlock(nn.Module):
         self.ln2 = RMSNorm(d_model)
         self.ffn = SwiGLU(d_model, d_ff)
         
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor,
+                cos: torch.Tensor | None = None,
+                sin: torch.Tensor | None = None) -> torch.Tensor:
         # pre-norm: so that it doesn't affect the main residual signal path
         # y = x + self.attn(self.ln1(x))
         
         # output = y + self.ffn(self.ln2(y))
         
         # post-norm: hard to train, but learn more robust representations
-        y = self.ln1(x + self.attn(x))
+        y = self.ln1(x + self.attn(x, cos=cos, sin=sin))
         
         output = self.ln2(y + self.ffn(y))
         
@@ -99,11 +104,9 @@ class BasicsTransformerLM(nn.Module):
                  num_heads: int,
                  d_ff: int,
                  context_scale: int=1,
+                 tie_word_embedding: bool = True,
                  rope_theta: float | None = None):
         super().__init__()
-        self.config = {
-            k: v for k, v in locals().items() if k != "self" and not (k.startswith("__") and k.endswith("__"))
-        }
         self.d_model = d_model
         self.vocab_size = vocab_size
         self.num_layers = num_layers
@@ -117,20 +120,23 @@ class BasicsTransformerLM(nn.Module):
                 d_model,
                 num_heads,
                 d_ff,
-                pos_encoder=self.rope
             )
             for _ in range(num_layers)
         ])
         self.ln_final = RMSNorm(d_model)
         self.lm_head = Linear(d_model, vocab_size)
+        if tie_word_embedding:
+            self.token_embeddings.weight = self.lm_head.weight
         
         # report number of parameters
         logger.info(f"number of non-embedding parameters: {self.get_num_params() / 1e6:.2f}M")
         
     def forward(self, x: torch.IntTensor, y: torch.IntTensor | None = None) -> tuple[torch.Tensor, torch.Tensor | None]:
+        B, T = x.shape
+        cos, sin = self.rope.get_cosin(T)
         x = self.token_embeddings(x)
         for layer in self.layers:
-            x = layer(x)
+            x = layer(x, cos=cos, sin=sin)
         x = self.ln_final(x)
         if y is not None:
             logits = self.lm_head(x)
@@ -176,8 +182,7 @@ class BasicsTransformerLM(nn.Module):
         ori_seq_len = x.size(-1)
         for _ in range(max_new_tokens):
             # Always padding left, thus model see meaning token at right side
-            x = x[:, -self.context_length:] if x.size(1) > self.context_length else x
-            logits, _ = self.forward(x)
+            logits, _ = self.forward(x[:, -self.context_length:] if x.size(-1) > self.context_length else x)
             next_token_logits = logits[:, -1]
             temp_scaled_next_token_logits = next_token_logits / temperature
             if top_k:
@@ -191,9 +196,61 @@ class BasicsTransformerLM(nn.Module):
             next_token_id = torch.multinomial(next_token_prob, 1)
             if eos_token_id is not None and next_token_id.item() == eos_token_id:
                 break
-            x = torch.cat([x, next_token_id], dim=-1)
+            x = torch.cat((x, next_token_id), dim=-1)
         new_token_ids = x[:, ori_seq_len:]
         return new_token_ids
+    
+    @torch.no_grad()
+    def generate_async(self,
+                       prompt: str,
+                       max_new_tokens: int,
+                       tokenizer: BPETokenizer,
+                       temperature: float = 1.0,
+                       top_k: Optional[int] = None,
+                       stop_tokens: Optional[list[str]] = None) -> AsyncGenerator[str, None]:
+        input_ids = tokenizer.encode(prompt)
+        x = torch.tensor([input_ids], device=self.device).to(torch.int64)
+        
+        ori_seq_len = x.size(-1)
+        generated_tokens = []
+        stop_token_ids = []
+        if stop_tokens:
+            for token in stop_tokens:
+                token_ids = tokenizer.encode(token)
+                stop_token_ids.append(token_ids)
+        
+        eos_token_id = getattr(self.tokenizer, 'eos_token_id', None)
+        
+        
+        # 开始生成
+        for step in range(max_new_tokens):
+            # 让出控制权，实现真正的异步
+            await asyncio.sleep(0)
+            
+            logits, _ = self.forward(x[:, -self.context_length:] if x.size(-1) > self.context_length else x)
+            next_token_logits = logits[:, -1]
+            temp_scaled_next_token_logits = next_token_logits / temperature
+            if top_k:
+                topk_values, _ = torch.topk(temp_scaled_next_token_logits,
+                                            k=min(top_k, temp_scaled_next_token_logits.size(-1)))
+                threshold = topk_values[:, -1]
+                topk_mask = temp_scaled_next_token_logits < threshold
+                temp_scaled_next_token_logits.masked_fill_(topk_mask, float("-inf"))
+            next_token_prob = softmax(temp_scaled_next_token_logits, dim=-1)
+            # sample from a multinomial with model generated probability
+            next_token_id = torch.multinomial(next_token_prob, 1)
+            token_id = next_token_id.item()
+            
+            generated_tokens.append(token_id)
+            new_text = self.tokenizer.decode([token_id])
+            yield new_text
+            
+            if eos_token_id is not None and token_id == eos_token_id:
+                break
+            if stop_token_ids and token_id in stop_token_ids:
+                break
+            
+            x = torch.cat((x, next_token_id), dim=-1)
     
     @classmethod
     def from_pretrained(cls, pretrained_model_path: str):

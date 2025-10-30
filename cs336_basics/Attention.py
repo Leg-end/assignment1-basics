@@ -3,7 +3,7 @@ import math
 import einx
 from einops import rearrange, einsum
 from torch import nn
-from .RoPE import RotaryEmbedding
+from .RoPE import RotaryEmbedding, apply_rope
 from .linear import Linear
 
 
@@ -44,7 +44,7 @@ class CasualMultiHeadSelfAttention(nn.Module):
                  num_heads: int,
                  pos_encoder: RotaryEmbedding | None = None):
         super().__init__()
-        assert d_model % num_heads == 0, "d_model should be divisible by num_heads"
+        assert d_model % num_heads == 0, f"d_model({d_model}) should be divisible by num_heads({num_heads})"
         self.num_heads = num_heads
         self.d_model = d_model
         self.pos_encoder = pos_encoder
@@ -54,7 +54,10 @@ class CasualMultiHeadSelfAttention(nn.Module):
         self.v_proj = Linear(d_model, self.d_k * num_heads)
         self.output_proj = Linear(self.d_k * num_heads, d_model)
         
-    def forward(self, x: torch.Tensor, token_positions: torch.Tensor | None = None) -> torch.Tensor:
+    def forward(self, x: torch.Tensor,
+                token_positions: torch.Tensor | None = None,
+                cos: torch.Tensor | None = None,
+                sin: torch.Tensor | None = None) -> torch.Tensor:
         *b, seq_len, d_model = x.size()
         assert d_model == self.d_model, f"d_model of input ({d_model}) should be equal to {self.d_model}"
         Q = self.q_proj(x)
@@ -73,6 +76,8 @@ class CasualMultiHeadSelfAttention(nn.Module):
             # Q, K = self.pos_encoder(Q, K, token_positions)
             Q = self.pos_encoder(Q, token_positions)
             K = self.pos_encoder(K, token_positions)
+        elif cos is not None and sin is not None:
+            Q, K = apply_rope(Q, K, cos, sin)
         
         seq = torch.arange(seq_len, device=x.device)
         qi = einx.rearrange('query -> b... 1 query 1', seq, b = [1] * len(b))

@@ -4,8 +4,8 @@
 
 root_dir: ${hydra:runtime.cwd}
 
-exp_name: cs336_lm_TinyStories
 dataset_name: TinyStories     # `TinyStories` or `owt`, change as needed
+exp_name: cs336_lm_${dataset_name}
 dat_dir: ${root_dir}/data/${dataset_name}/dat
 
 vocab_size_map:
@@ -49,6 +49,7 @@ model:
   num_heads: 16
   d_ff: 1344
   rope_theta: 10000.0
+  tie_word_embeddings: true
 tokenizer_dir: ${root_dir}/tokenizers/${dataset_name}_train/ # save path for tokenizer
 tokenizer:
   vocab_path: ${tokenizer_dir}/vocab.pkl

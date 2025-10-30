@@ -6,6 +6,7 @@ import os
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from tests.adapters import BPETokenizer, get_adamw_cls, run_get_lr_cosine_schedule,\
     run_load_checkpoint, run_save_checkpoint, run_get_batch, clip_grad_norm, BasicsTransformerLM
+from cs336_basics.qwen2_5 import Qwen2_5
 # from cs336_basics.model import BasicsTransformerLM
 import torch
 import math
@@ -340,9 +341,11 @@ def main(cfg: DictConfig):
     model_config, tokenizer_config = cfg.model, cfg.tokenizer
     running_config = cfg.training if training else cfg.eval
     tokenizer = BPETokenizer.from_files(**tokenizer_config)
-    print(f"vocab size: {tokenizer.vocab_size}")
-    model = BasicsTransformerLM(**model_config)
-    pprint(model)
+    logger.info(f"vocab size: {tokenizer.vocab_size}")
+    if cfg.model_type == "qwen2_5":
+        model = Qwen2_5(**model_config)
+    else:
+        model = BasicsTransformerLM(**model_config)
     
     if torch.cuda.is_available():
         gpu_id = running_config.get("gpu_id", 0)
@@ -351,6 +354,7 @@ def main(cfg: DictConfig):
         device = "cpu"
     
     if training:
+        pprint(model)
         train(model, device, running_config, tokenizer)
     else:
         torch.manual_seed(running_config.seed)

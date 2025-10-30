@@ -7,6 +7,16 @@ def silu(x: torch.Tensor) -> torch.Tensor:
     return x * torch.sigmoid(x)
 
 
+class SiLU(nn.Module):
+    def __init__(self, d_model: int):
+        super().__init__()
+        d_ff = 4 * d_model
+        self.up_proj = Linear(d_model, d_ff)
+        self.down_proj = Linear(d_ff, d_model)
+
+    def forward(self, x):
+        return self.down_proj(silu(self.up_proj(x)))
+
 
 class SwiGLU(nn.Module):
     """
@@ -18,12 +28,16 @@ class SwiGLU(nn.Module):
         super().__init__()
         self.d_model = d_model
         self.d_ff = d_ff
-        self.w1 = Linear(d_model, d_ff)
-        self.w2 = Linear(d_ff, d_model)
-        self.w3 = Linear(d_model, d_ff)
+        self.up_proj = Linear(d_model, d_ff)
+        self.down_proj = Linear(d_ff, d_model)
+        self.gate_proj = Linear(d_model, d_ff)
         
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.w2(silu(self.w1(x)) * self.w3(x))
+        x, gate = self.up_proj(x), self.gate_proj(x)
+        x = silu(gate) * x
+        x = self.down_proj(x)
+        
+        return x
     
     def get_FLOPS(self, ctx_len):
         w1_flops = 2 * ctx_len * self.d_ff * self.d_model + 2 * ctx_len * self.d_ff

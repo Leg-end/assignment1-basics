@@ -46,6 +46,13 @@ class RotaryEmbedding(nn.Module):
 
         cos, sin = torch.cos(freqs), torch.sin(freqs)
         return torch.stack((cos, sin))
+    
+    def get_cosin(self, T):
+        pos_ids = torch.arange(T, device=self.device).unsqueeze(0)
+        cos, sin = einx.get_at('cos_sin [pos] half_dim, ... -> cos_sin ... half_dim', self._freq_cis_cache, pos_ids)
+        cos = torch.cat([cos, cos], dim=-1)
+        sin = torch.cat([sin, sin], dim=-1)
+        return cos, sin
 
     def forward(self, x: Float[Tensor, " ... seq d"], pos_ids: Int[Tensor, " ... seq"] | None=None) -> Float[Tensor, " ... seq d"]:
         x1, x2 = rearrange(x, '... (half_d xy) -> xy ... half_d', xy=2)
@@ -72,7 +79,6 @@ class RotaryEmbedding(nn.Module):
         return f"context_length={self._freq_cis_cache.shape[0]}, dim/2={self._freq_cis_cache.shape[1]}"
 
 
-
 def rotate_half(x, original=True):
     if not original:
         x1 = x[..., : x.shape[-1] // 2]
@@ -84,6 +90,14 @@ def rotate_half(x, original=True):
         # [-x1, x0, -x3, x2, ...]
         x = torch.stack([-x1, x2], dim=-1).view(*x.shape)
     return x
+
+
+def apply_rope(q, k, cos, sin, unsqueeze_dim=1, original=True):
+    cos = cos.unsqueeze(unsqueeze_dim)
+    sin = sin.unsqueeze(unsqueeze_dim)
+    q_embed = (q * cos) + (rotate_half(q, original=original) * sin)
+    k_embed = (k * cos) + (rotate_half(k, original=original) * sin)
+    return q_embed, k_embed
         
         
         
