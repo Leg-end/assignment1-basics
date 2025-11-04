@@ -5,7 +5,8 @@
 root_dir: ${hydra:runtime.cwd}
 
 dataset_name: TinyStories     # `TinyStories` or `owt`, change as needed
-exp_name: cs336_lm_${dataset_name}
+model_type: cs336_lm
+exp_name: ${model_type}_${dataset_name}
 dat_dir: ${root_dir}/data/${dataset_name}/dat
 
 vocab_size_map:
@@ -16,31 +17,41 @@ training:
   train_data_path: ${dat_dir}/train.dat
   valid_data_path: ${dat_dir}/valid.dat
 
-  run_id: Pretrain-Baseline-LLM-Post-Norm
+  run_id: Pretrain-Baseline-LLM-Pre-Norm-RoPE
+  experiment_config:
+    name: ${exp_name}
   seed: 1234
   dtype: float32
   compile: false
   save_path: "checkpoints/${exp_name}" # save path for both first train and resume train
   gpu_id: 7
-  lr: 0.0005
-  min_lr: 0.0001
+  lr: 0.001
+  min_lr: 0.0002
   weight_decay: 0.01
   beta1: 0.9
   beta2: 0.999
   eps: 1e-8
-  batch_size: 32
+  batch_size: 96
   context_length: 256
-  train_steps: 5000
+  train_steps: 2000
   clip_grad_norm: 1.0
-  warmup_iters: 500
-  cosine_iters: 5000
+  warmup_iters: 100
+  cosine_iters: 2000
   val_interval: 100
   val_batches: 20
-  save_interval: 1000
+  prompts:
+  - The hotel’s high-ceilinged lobby resembles that of a ski resort
+  - On the evening of Oct. 12, couples and families dressed
+  - Yang looked up at Blake
+  max_new_tokens: 256  # 256 * 4
+  temperature: 0.8
+  top_k: null
+  top_p: 0.9
+  repetition_penalty: 1.0
+  save_interval: 500
   resume_checkpoint: null   # load checkpoint from current hydra run dir
   gradient_accumulation_steps: 1
 
-model_type: cs336_lm
 model:
   vocab_size: ${vocab_size_map.${dataset_name}}
   context_length: 256
@@ -49,8 +60,8 @@ model:
   num_heads: 16
   d_ff: 1344
   rope_theta: 10000.0
-  tie_word_embeddings: true
-tokenizer_dir: ${root_dir}/tokenizers/${dataset_name}_train/ # save path for tokenizer
+  tie_word_embeddings: false
+tokenizer_dir: ${root_dir}/tokenizers/${dataset_name}_train # save path for tokenizer
 tokenizer:
   vocab_path: ${tokenizer_dir}/vocab.pkl
   merges_path: ${tokenizer_dir}/merges.pkl

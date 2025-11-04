@@ -19,7 +19,8 @@ def scaled_dot_product_attention(
     Q: torch.Tensor,
     K: torch.Tensor,
     V: torch.Tensor,
-    mask: torch.Tensor | None = None) -> torch.Tensor:
+    mask: torch.Tensor | None = None,
+    need_weights: bool = False) -> torch.Tensor:
     """
     Args:
         Q (Float[Tensor, " ... queries d_k"]): Query tensor
@@ -58,8 +59,8 @@ class CasualMultiHeadSelfAttention(nn.Module):
                 token_positions: torch.Tensor | None = None,
                 cos: torch.Tensor | None = None,
                 sin: torch.Tensor | None = None) -> torch.Tensor:
-        *b, seq_len, d_model = x.size()
-        assert d_model == self.d_model, f"d_model of input ({d_model}) should be equal to {self.d_model}"
+        *b, T, D = x.size()
+        assert D == self.d_model, f"d_model of input ({D}) should be equal to {self.d_model}"
         Q = self.q_proj(x)
         K = self.k_proj(x)
         V = self.v_proj(x)
@@ -68,9 +69,11 @@ class CasualMultiHeadSelfAttention(nn.Module):
                    for X in (Q, K, V))
 
         if self.pos_encoder is not None:
+            if cos is not None:
+                raise ValueError("Did you mean to pass both cos and sin? If so, you should pass cos=cos, sin=sin.")
             if token_positions is None:
                 token_positions = einx.rearrange(
-                    "seq -> b... seq", torch.arange(seq_len, device=x.device), b = [1] * len(b))
+                    "seq -> b... seq", torch.arange(T, device=x.device), b=[1] * len(b))
             # duplicate for each head
             token_positions = rearrange(token_positions, "... seq -> ... 1 seq")
             # Q, K = self.pos_encoder(Q, K, token_positions)
@@ -79,9 +82,9 @@ class CasualMultiHeadSelfAttention(nn.Module):
         elif cos is not None and sin is not None:
             Q, K = apply_rope(Q, K, cos, sin)
         
-        seq = torch.arange(seq_len, device=x.device)
-        qi = einx.rearrange('query -> b... 1 query 1', seq, b = [1] * len(b))
-        kj = einx.rearrange('key -> b... 1 1 key', seq, b = [1] * len(b))
+        seq = torch.arange(T, device=x.device)
+        qi = einx.rearrange('query -> b... 1 query 1', seq, b=[1] * len(b))
+        kj = einx.rearrange('key -> b... 1 1 key', seq, b=[1] * len(b))
         casual_mask = qi >= kj
         
         O = scaled_dot_product_attention(Q, K, V, mask=casual_mask)

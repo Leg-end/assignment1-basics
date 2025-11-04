@@ -5,7 +5,8 @@
 root_dir: ${hydra:runtime.cwd}
 
 dataset_name: TinyStories     # `TinyStories` or `owt`, change as needed
-exp_name: qwen2_5_${dataset_name}
+model_type: qwen2_5
+exp_name: ${model_type}_${dataset_name}
 dat_dir: ${root_dir}/data/${dataset_name}/dat
 
 vocab_size_map:
@@ -13,34 +14,44 @@ vocab_size_map:
   owt: 32_000
   
 training:
-  train_data_path: ${root_dir}/data/dat/train.dat
-  val_data_path: ${root_dir}/data/dat/valid.dat
+  train_data_path: ${dat_dir}/train.dat
+  valid_data_path: ${dat_dir}/valid.dat
 
-  run_id: Pretrain-QWen2_5-LLM-Post-Norm
+  run_id: Pretrain-QWen2_5-LLM-Pre-Norm-RoPE
+  experiment_config:
+    name: ${exp_name}
   seed: 1234
   dtype: float32
   compile: false
   save_path: "checkpoints/${exp_name}" # save path for both first train and resume train
   gpu_id: 7
-  lr: 0.0005
-  min_lr: 0.0001
+  lr: 0.001
+  min_lr: 0.0002
   weight_decay: 0.01
   beta1: 0.9
   beta2: 0.999
   eps: 1e-8
-  batch_size: 64
+  batch_size: 96
   context_length: 256
-  train_steps: 5000
+  train_steps: 2000
   clip_grad_norm: 1.0
-  warmup_iters: 500
-  cosine_iters: 5000
-  val_interval: 200
+  warmup_iters: 100
+  cosine_iters: 2000
+  val_interval: 100
   val_batches: 20
-  save_interval: 1000
+  prompts:
+  - The hotel’s high-ceilinged lobby resembles that of a ski resort
+  - On the evening of Oct. 12, couples and families dressed
+  - Yang looked up at Blake
+  max_new_tokens: 256  # 256 * 4
+  temperature: 0.8
+  top_k: null
+  top_p: 0.9
+  repetition_penalty: 1.0
+  save_interval: 500
   resume_checkpoint: null   # load checkpoint from current hydra run dir
   gradient_accumulation_steps: 1
 
-model_type: qwen2_5
 model:
   architectures:
     - Qwen2ForCausalLM
@@ -65,12 +76,12 @@ model:
   transformers_version: 4.43.1
   use_cache: true
   use_sliding_window: false
-  vocab_size: 151936
+  vocab_size: ${vocab_size_map.${dataset_name}} # 151936
 
 ## only used for pretrain Qwen
 dataset_split: train          # `train` or `valid`, change as needed
+tokenizer_dir: ${root_dir}/tokenizers/${dataset_name}_${dataset_split} # save path for tokenizer
 tokenizer:
-  tokenizer_dir: ${root_dir}/tokenizers/${dataset_fname}_${dataset_split}/ # save path for tokenizer
   vocab_path: ${tokenizer_dir}/vocab.pkl
   merges_path: ${tokenizer_dir}/merges.pkl
   special_tokens: ["<|endoftext|>"]

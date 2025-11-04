@@ -12,10 +12,12 @@ eval:
   save_path: checkpoints/cs336_lm_TinyStories/
   gpu_id: 7
   iteration: 5000
-  prompt: Once upon a time, there was a pretty girl named Lily.
+  prompts: "/data/lanyun/worksapce/assignment1-basics/scripts/test_prompts.json"
   max_new_tokens: 256  # 256 * 4
-  temperature: 0.7
-  top_k: 50
+  temperature: 0.5
+  top_k: 20
+  top_p: 0.9
+  repetition_penalty: 1.1
 
 model_type: cs336_lm
 model:
@@ -26,11 +28,12 @@ model:
   num_layers: 4
   num_heads: 16
   d_ff: 1344
-  rope_theta: 10000.0
+  rope_theta: null
+  tie_word_embeddings: true
 
 dataset_name: TinyStories     # `TinyStories` or `owt`, change as needed
 dataset_split: train          # `train` or `valid`, change as needed
-tokenizer_dir: ${root_dir}/tokenizers/${dataset_name}_${dataset_split}/ # save path for tokenizer
+tokenizer_dir: ${root_dir}/tokenizers/${dataset_name}_${dataset_split} # save path for tokenizer
 tokenizer:
   vocab_path: ${tokenizer_dir}/vocab.pkl
   merges_path: ${tokenizer_dir}/merges.pkl

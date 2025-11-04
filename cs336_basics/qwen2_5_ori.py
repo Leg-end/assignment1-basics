@@ -92,116 +92,40 @@ def _compute_rope_params(config):
 
 
 
-# class CasualGroupQueryAttention(nn.Module):
-#     def __init__(self, n_embd, n_head, n_group, proj_bias=False):
-#         super(CasualGroupQueryAttention, self).__init__()
-#         self.n_embd = n_embd
-#         self.n_head = n_head
-#         self.n_group = n_group
-#         self.hs = n_embd // n_head
-#         self.q_proj = nn.Linear(n_embd, n_embd)
-#         self.kv_proj = nn.Linear(n_embd, 2 * self.n_group * self.hs)
-#         self.o_proj = nn.Linear(n_embd, n_embd, bias=proj_bias)
-
-#     def forward(self, x, cos=None, sin=None):
-#         B, T, D = x.shape
-#         q = self.q_proj(x).view(B, T, self.n_head, self.hs).transpose(1, 2)  # (B, N, T, H)
-#         k, v = self.kv_proj(x).chunk(2, dim=-1)                              # (B, T, N_G * H)
-#         k = k.view(B, T, self.n_group, self.hs).transpose(1, 2)         # (B, N_G, T, H)
-#         v = v.view(B, T, self.n_group, self.hs).transpose(1, 2)
-        
-#         k = repeat(k, self.n_head // self.n_group)
-#         v = repeat(v, self.n_head // self.n_group)
-
-#         if cos is not None and sin is not None:
-#             q, k = apply_rotary_pos_emb(q, k, cos, sin)
-        
-#         attn = q @ k.transpose(-1,-2) / math.sqrt(self.hs)
-#         mask = torch.tril(torch.ones(T, T)).view(1, 1, T, T).to(attn.device)
-#         attn = attn.masked_fill(mask[:,:,:T,:T] == 0, float('-inf'))
-#         attn = F.softmax(attn, dim=-1)                                    # (B, N, T, T)
-
-#         o = attn @ v                                                      # (B, N, T, H)
-#         o = o.transpose(1,2).contiguous().view(B, T, D)
-#         o = self.o_proj(o)   
-        
-#         return o
 class CasualGroupQueryAttention(nn.Module):
-    def __init__(self,
-                 n_embd: int,
-                 n_head: int,
-                 n_group: int,
-                 proj_bias: bool = False,
-                 pos_encoder=None):
+    def __init__(self, n_embd, n_head, n_group, proj_bias=False):
         super(CasualGroupQueryAttention, self).__init__()
         self.n_embd = n_embd
-        self.pos_encoder = pos_encoder
         self.n_head = n_head
         self.n_group = n_group
         self.hs = n_embd // n_head
         self.q_proj = nn.Linear(n_embd, n_embd)
-        self.kv_proj = nn.Linear(n_embd, 2 * self.n_group * self.hs) # share within different groups
+        self.kv_proj = nn.Linear(n_embd, 2 * self.n_group * self.hs)
         self.o_proj = nn.Linear(n_embd, n_embd, bias=proj_bias)
-        
-    def forward(self, x: torch.Tensor,
-                cos: torch.Tensor | None = None,
-                sin: torch.Tensor | None = None) -> torch.Tensor:
-        *b, T, D = x.size()
-        B = b[0]
-        assert D == self.n_embd, f"n_embd of input ({D}) should be equal to {self.n_embd}"
-        q = self.q_proj(x)
-        k, v = self.kv_proj(x).chunk(2, dim=-1)
-        
-        q = rearrange(q, '... seq (heads d) -> ... heads seq d', heads=self.n_head)
-        k = rearrange(k, '... seq (groups d) -> ... groups seq d', groups=self.n_group)
-        v = rearrange(v, '... seq (groups d) -> ... groups seq d', groups=self.n_group)
-        
-        rep = self.n_head // self.n_group
-        k = einx.rearrange('... groups seq d -> ... (groups rep) seq d', k, rep=rep)
-        v = einx.rearrange('... groups seq d -> ... (groups rep) seq d', v, rep=rep)
-        
-        if self.pos_encoder is not None:
-            if token_positions is None:
-                token_positions = einx.rearrange(
-                    "seq -> b... seq", torch.arange(T, device=x.device), b = [1] * len(b))
-            # duplicate for each head
-            token_positions = rearrange(token_positions, "... seq -> ... 1 seq")
-            q = self.pos_encoder(q, token_positions)
-            k = self.pos_encoder(k, token_positions)
-        elif cos is not None and sin is not None:
-            q, k = apply_rope(q, k, cos, sin, original=False)
-        
-        seq = torch.arange(T, device=x.device)
-        qi = einx.rearrange('query -> b... 1 query 1', seq, b = [1] * len(b))
-        kj = einx.rearrange('key -> b... 1 1 key', seq, b = [1] * len(b))
-        casual_mask = qi >= kj
-        
-        o = scaled_dot_product_attention(q, k, v, casual_mask)
-        o = rearrange(o, "batch heads seq d -> batch seq (heads d)").contiguous()
-        output = self.o_proj(o)
-        return output
-        # B, T, D = x.shape
-        # q = self.q_proj(x).view(B, T, self.n_head, self.hs).transpose(1, 2)  # (B, N, T, H)
-        # k, v = self.kv_proj(x).chunk(2, dim=-1)                              # (B, T, N_G * H)
-        # k = k.view(B, T, self.n_group, self.hs).transpose(1, 2)         # (B, N_G, T, H)
-        # v = v.view(B, T, self.n_group, self.hs).transpose(1, 2)
-        
-        # k = repeat(k, self.n_head // self.n_group)
-        # v = repeat(v, self.n_head // self.n_group)
 
-        # if cos is not None and sin is not None:
-        #     q, k = apply_rotary_pos_emb(q, k, cos, sin)
+    def forward(self, x, cos=None, sin=None):
+        B, T, D = x.shape
+        q = self.q_proj(x).view(B, T, self.n_head, self.hs).transpose(1, 2)  # (B, N, T, H)
+        k, v = self.kv_proj(x).chunk(2, dim=-1)                              # (B, T, N_G * H)
+        k = k.view(B, T, self.n_group, self.hs).transpose(1, 2)         # (B, N_G, T, H)
+        v = v.view(B, T, self.n_group, self.hs).transpose(1, 2)
         
-        # attn = q @ k.transpose(-1,-2) / math.sqrt(self.hs)
-        # mask = torch.tril(torch.ones(T, T)).view(1, 1, T, T).to(attn.device)
-        # attn = attn.masked_fill(mask[:,:,:T,:T] == 0, float('-inf'))
-        # attn = F.softmax(attn, dim=-1)                                    # (B, N, T, T)
+        k = repeat(k, self.n_head // self.n_group)
+        v = repeat(v, self.n_head // self.n_group)
 
-        # o = attn @ v                                                      # (B, N, T, H)
-        # o = o.transpose(1,2).contiguous().view(B, T, D)
-        # o = self.o_proj(o)   
+        if cos is not None and sin is not None:
+            q, k = apply_rotary_pos_emb(q, k, cos, sin)
         
-        # return o
+        attn = q @ k.transpose(-1,-2) / math.sqrt(self.hs)
+        mask = torch.tril(torch.ones(T, T)).view(1, 1, T, T).to(attn.device)
+        attn = attn.masked_fill(mask[:,:,:T,:T] == 0, float('-inf'))
+        attn = F.softmax(attn, dim=-1)                                    # (B, N, T, T)
+
+        o = attn @ v                                                      # (B, N, T, H)
+        o = o.transpose(1,2).contiguous().view(B, T, D)
+        o = self.o_proj(o)   
+        
+        return o
 
 
 class Block(nn.Module):

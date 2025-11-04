@@ -3,7 +3,6 @@ import os
 import json
 import einx
 import logging
-import math
 from einops import rearrange
 from .RMSNorm import RMSNorm
 from .Attention import scaled_dot_product_attention, softmax
@@ -11,44 +10,43 @@ from .SwiGLU import SwiGLU
 from .RoPE import RotaryEmbedding, apply_rope
 from .Loss import cross_entropy_loss
 from torch import nn
-from torch.nn import functional as F
 
 logger = logging.getLogger(__name__)
 
 
 class CasualGroupQueryAttention(nn.Module):
     def __init__(self,
-                 hidden_size: int,
-                 num_attention_heads: int,
-                 num_key_value_heads: int,
+                 d_model: int,
+                 num_heads: int,
+                 num_groups: int,
                  proj_bias: bool = False,
                  pos_encoder: RotaryEmbedding | None = None):
         super(CasualGroupQueryAttention, self).__init__()
-        assert hidden_size % num_attention_heads == 0, f"hidden_size({hidden_size}) should be divisible by num_attention_heads({num_attention_heads})"
-        assert num_attention_heads % num_key_value_heads == 0, f"num_attention_heads({num_attention_heads}) should be divisible by num_key_value_heads({num_key_value_heads})"
-        self.hidden_size = hidden_size
+        assert d_model % num_heads == 0, f"d_model({d_model}) should be divisible by num_heads({num_heads})"
+        assert num_heads % num_groups == 0, f"num_heads({num_heads}) should be divisible by num_groups({num_groups})"
+        self.d_model = d_model
         self.pos_encoder = pos_encoder
-        self.num_attention_heads = num_attention_heads
-        self.num_key_value_heads = num_key_value_heads
-        self.d_k = hidden_size // num_attention_heads
-        self.q_proj = nn.Linear(hidden_size, self.d_k * num_attention_heads)
-        self.kv_proj = nn.Linear(hidden_size, 2 * self.num_key_value_heads * self.d_k) # share within different groups
-        self.o_proj = nn.Linear(self.d_k * num_attention_heads, hidden_size, bias=proj_bias)
+        self.num_heads = num_heads
+        self.num_groups = num_groups
+        self.d_k = d_model // num_heads
+        self.q_proj = nn.Linear(d_model, self.d_k * num_heads)
+        self.kv_proj = nn.Linear(d_model, 2 * self.num_groups * self.d_k) # share within different groups
+        self.o_proj = nn.Linear(self.d_k * num_heads, d_model, bias=proj_bias)
         
     def forward(self, x: torch.Tensor,
                 token_positions: torch.Tensor | None = None,
                 cos: torch.Tensor | None = None,
                 sin: torch.Tensor | None = None) -> torch.Tensor:
-        *b, T, hidden_size = x.size()
-        assert hidden_size == self.hidden_size, f"hidden_size of input ({hidden_size}) should be equal to {self.hidden_size}"
+        *b, T, d_model = x.size()
+        assert d_model == self.d_model, f"d_model of input ({d_model}) should be equal to {self.d_model}"
         Q = self.q_proj(x)
         K, V = self.kv_proj(x).chunk(2, dim=-1)
         
-        Q = rearrange(Q, '... seq (heads d) -> ... heads seq d', heads=self.num_attention_heads)
-        K = rearrange(K, '... seq (groups d) -> ... groups seq d', groups=self.num_key_value_heads)
-        V = rearrange(V, '... seq (groups d) -> ... groups seq d', groups=self.num_key_value_heads)
+        Q = rearrange(Q, '... seq (heads d) -> ... heads seq d', heads=self.num_heads)
+        K = rearrange(K, '... seq (groups d) -> ... groups seq d', groups=self.num_groups)
+        V = rearrange(V, '... seq (groups d) -> ... groups seq d', groups=self.num_groups)
         
-        rep = self.num_attention_heads // self.num_key_value_heads
+        rep = self.num_heads // self.num_groups
         K = einx.rearrange('... groups seq d -> ... (groups rep) seq d', K, rep=rep)
         V = einx.rearrange('... groups seq d -> ... (groups rep) seq d', V, rep=rep)
         
@@ -78,21 +76,21 @@ class CasualGroupQueryAttention(nn.Module):
 class Block(nn.Module):
     
     def __init__(self,
-                 hidden_size: int,
-                 num_attention_heads: int,
-                 num_key_value_heads: int,
-                 intermediate_size: int,
+                 d_model: int,
+                 num_heads: int,
+                 num_groups: int,
+                 d_ff: int,
                  pos_encoder: RotaryEmbedding | None = None):
         super().__init__()
-        self.ln1 = RMSNorm(hidden_size)
+        self.ln1 = RMSNorm(d_model)
         self.attn = CasualGroupQueryAttention(
-            hidden_size,
-            num_attention_heads,
-            num_key_value_heads,
+            d_model,
+            num_heads,
+            num_groups,
             pos_encoder=pos_encoder
         )
-        self.ln2 = RMSNorm(hidden_size)
-        self.ffn = SwiGLU(hidden_size, intermediate_size)
+        self.ln2 = RMSNorm(d_model)
+        self.ffn = SwiGLU(d_model, d_ff)
         
     def forward(self, x: torch.Tensor,
                 cos: torch.Tensor | None = None,
@@ -120,16 +118,18 @@ class Qwen2_5(nn.Module):
                  num_attention_heads: int,
                  num_key_value_heads: int,
                  intermediate_size: int,
-                 context_scale: int=1,
-                 tie_word_embedding: bool = True,
+                 context_scale: int = 1,
+                 tie_word_embeddings: bool = True,
                  rope_theta: float | None = None,
                  **kwargs):
         super().__init__()
-        self.hidden_size = hidden_size
+        self.d_model = hidden_size
         self.vocab_size = vocab_size
-        self.num_hidden_layers = num_hidden_layers
-        self.num_attention_heads = num_attention_heads
-        self.max_position_embeddings = max_position_embeddings
+        self.num_layes = num_hidden_layers
+        self.num_heads = num_attention_heads
+        self.context_length = max_position_embeddings
+        self.rope_theta = rope_theta
+        self.tie_word_embeddings = tie_word_embeddings
         self.rope = RotaryEmbedding(hidden_size // num_attention_heads, rope_theta, max_position_embeddings,
                                     context_scale=context_scale) if rope_theta is not None else None
         self.token_embeddings = nn.Embedding(vocab_size, hidden_size)
@@ -144,7 +144,7 @@ class Qwen2_5(nn.Module):
         ])
         self.ln_final = RMSNorm(hidden_size)
         self.lm_head = nn.Linear(hidden_size, vocab_size, bias=False)
-        if tie_word_embedding:
+        if tie_word_embeddings:
             self.token_embeddings.weight = self.lm_head.weight
         
         # report number of parameters
@@ -152,7 +152,10 @@ class Qwen2_5(nn.Module):
         
     def forward(self, x: torch.Tensor, y: torch.Tensor | None = None) -> torch.Tensor:
         B, T = x.shape
-        cos, sin = self.rope.get_cosin(T)
+        if self.rope_theta is not None:
+            cos, sin = self.rope.get_cosin(T, original=False)
+        else:
+            cos, sin = None, None
         x = self.token_embeddings(x)
         for layer in self.layers:
             x = layer(x, cos=cos, sin=sin)
@@ -172,6 +175,8 @@ class Qwen2_5(nn.Module):
                  max_new_tokens: int,
                  temperature: float = 1.0,
                  top_k: int | None = 50,
+                 top_p: float | None = 0.9,
+                 repetition_penalty: float = 1.0,
                  eos_token_id: int | None = None) -> torch.LongTensor:
         """
         Args:
@@ -183,6 +188,10 @@ class Qwen2_5(nn.Module):
                 Temperature to use during generation.
             top_k: int
                 If provided, only sample from the `top_k` vocab items (by probability).
+            top_p: float
+                If provided, only sample from the smallest set of vocab items with cumulative probability >= top_p.
+            repetition_penalty: float
+                Penalty to apply to repeated tokens (1.0 = no penalty, >1.0 = penalty).
             eos_token_id: int
                 If provided, stop generation when we generate this ID.
 
@@ -190,16 +199,37 @@ class Qwen2_5(nn.Module):
         """
         if input_ids.dim() == 1:
             input_ids = input_ids.unsqueeze(0)
-
+        
         idx = input_ids
         for _ in range(max_new_tokens):
-            idx_cond = idx if idx.size(1) <= self.max_position_embeddings else idx[:, -self.max_position_embeddings:]
+            idx_cond = idx if idx.size(1) <= self.context_length else idx[:, -self.context_length:]
             logits, _ = self(idx_cond)
-            logits = logits[:, -1, :] / temperature
+            logits = logits[:, -1, :]
+            
+            if repetition_penalty != 1.0:
+                score = logits.gather(1, idx)
+                score = torch.where(score < 0, score * repetition_penalty, score / repetition_penalty)
+                logits.scatter_(1, idx, score)
+            
+            if temperature != 1.0:
+                logits = logits / temperature
 
             if top_k is not None:
                 v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
                 logits[logits < v[:, [-1]]] = -float('Inf')
+            
+            if top_p is not None and top_p < 1.0:
+                sorted_logits, sorted_indices = torch.sort(logits, descending=True)
+                cumulative_probs = torch.cumsum(softmax(sorted_logits, dim=-1), dim=-1)
+                
+                # Remove tokens with cumulative probability above the threshold
+                sorted_indices_to_remove = cumulative_probs > top_p
+                # Shift the indices to the right to keep also the first token above the threshold
+                sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
+                sorted_indices_to_remove[..., 0] = 0
+                
+                indices_to_remove = sorted_indices_to_remove.scatter(1, sorted_indices, sorted_indices_to_remove)
+                logits[indices_to_remove] = -float('Inf')
 
             probs = softmax(logits, dim=-1)
             idx_next = torch.multinomial(probs, num_samples=1)
@@ -208,13 +238,15 @@ class Qwen2_5(nn.Module):
             if eos_token_id is not None:
                 if idx_next.item() == eos_token_id:
                     break
-
         return idx
     
     def get_num_params(self, non_embedding=True):
         n_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
         if non_embedding:
             n_params -= self.token_embeddings.weight.numel()
+            if not self.tie_word_embeddings:
+                n_params -= self.lm_head.weight.numel()
+        elif self.tie_word_embeddings:
             n_params -= self.lm_head.weight.numel()
         return n_params
         
@@ -243,7 +275,7 @@ class Qwen2_5(nn.Module):
                 Total per token = 12 * L * H * T^2 * Q / T = 12 * L * H * Q * T
         """
         N = self.get_num_params()
-        L, H, Q, T = self.num_hidden_layers, self.num_attention_heads, self.hidden_size // self.num_attention_heads, self.max_position_embeddings
+        L, H, Q, T = self.num_layes, self.num_heads, self.d_model // self.num_heads, self.context_length
         flops_per_token = 6 * N + 12 * L * H * Q * T
         return flops_per_token * T
     
@@ -286,7 +318,8 @@ class Qwen2_5(nn.Module):
 
             key_map = {'token_embeddings': 'embed_tokens', 'attn': 'self_attn', 'q_proj': 'q_proj',
                        'o_proj': 'o_proj', 'ffn': 'mlp', 'ln1': 'input_layernorm',
-                       'ln2': 'post_attention_layernorm', 'ln_final': 'norm',}
+                       'ln2': 'post_attention_layernorm', 'ln_final': 'norm',
+                       "w1": "gate_proj", "w3": "up_proj", "w2": "down_proj"}
 
             def to_hf_key(key):
                 components = key.split('.')

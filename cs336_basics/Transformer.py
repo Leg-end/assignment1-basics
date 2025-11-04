@@ -9,8 +9,6 @@ from .Attention import CasualMultiHeadSelfAttention, softmax
 from .SwiGLU import SwiGLU
 from .RoPE import RotaryEmbedding
 from .Loss import cross_entropy_loss
-from torch.nn import functional as F
-from langchain_core.language_models.llms import LLM
 import os
 import json
 import asyncio
@@ -26,27 +24,30 @@ class TransformerBlock(nn.Module):
                  d_ff: int,
                  pos_encoder: RotaryEmbedding | None = None):
         super().__init__()
-        self.ln1 = RMSNorm(d_model)
+        self.ln1 = RMSNorm(d_model, eps=1e-5)
         self.attn = CasualMultiHeadSelfAttention(
             d_model,
             num_heads,
             pos_encoder=pos_encoder
         )
-        self.ln2 = RMSNorm(d_model)
+        self.ln2 = RMSNorm(d_model, eps=1e-5)
         self.ffn = SwiGLU(d_model, d_ff)
         
     def forward(self, x: torch.Tensor,
                 cos: torch.Tensor | None = None,
                 sin: torch.Tensor | None = None) -> torch.Tensor:
         # pre-norm: so that it doesn't affect the main residual signal path
-        # y = x + self.attn(self.ln1(x))
+        y = x + self.attn(self.ln1(x), cos=cos, sin=sin)
         
-        # output = y + self.ffn(self.ln2(y))
+        output = y + self.ffn(self.ln2(y))
         
         # post-norm: hard to train, but learn more robust representations
-        y = self.ln1(x + self.attn(x, cos=cos, sin=sin))
+        # y = self.ln1(x + self.attn(x, cos=cos, sin=sin))
         
-        output = self.ln2(y + self.ffn(y))
+        # output = self.ln2(y + self.ffn(y))
+        
+        # parallel layers
+        # output = x + self.attn(self.ln1(x), cos=cos, sin=sin) + self.ffn(self.ln2(x))
         
         return output
     
@@ -103,8 +104,8 @@ class BasicsTransformerLM(nn.Module):
                  num_layers: int,
                  num_heads: int,
                  d_ff: int,
-                 context_scale: int=1,
-                 tie_word_embedding: bool = True,
+                 context_scale: int = 1,
+                 tie_word_embeddings: bool = False,
                  rope_theta: float | None = None):
         super().__init__()
         self.d_model = d_model
@@ -112,8 +113,14 @@ class BasicsTransformerLM(nn.Module):
         self.num_layers = num_layers
         self.num_heads = num_heads
         self.context_length = context_length
-        self.rope = RotaryEmbedding(d_model // num_heads, rope_theta, context_length,
-                                    context_scale=context_scale) if rope_theta is not None else None
+        self.rope_theta = rope_theta
+        self.tie_word_embeddings = tie_word_embeddings
+        if rope_theta is not None:
+            self.pos_embeddings = RotaryEmbedding(d_model // num_heads, rope_theta, context_length,
+                                        context_scale=context_scale)
+        else:
+            # self.pos_embeddings = Embedding(context_length, d_model)
+            self.pos_embeddings = None
         self.token_embeddings = Embedding(vocab_size, d_model)
         self.layers = nn.ModuleList([
             TransformerBlock(
@@ -125,7 +132,7 @@ class BasicsTransformerLM(nn.Module):
         ])
         self.ln_final = RMSNorm(d_model)
         self.lm_head = Linear(d_model, vocab_size)
-        if tie_word_embedding:
+        if tie_word_embeddings:
             self.token_embeddings.weight = self.lm_head.weight
         
         # report number of parameters
@@ -133,8 +140,13 @@ class BasicsTransformerLM(nn.Module):
         
     def forward(self, x: torch.IntTensor, y: torch.IntTensor | None = None) -> tuple[torch.Tensor, torch.Tensor | None]:
         B, T = x.shape
-        cos, sin = self.rope.get_cosin(T)
         x = self.token_embeddings(x)
+        if self.rope_theta is not None:
+            cos, sin = self.pos_embeddings.get_cosin(T)
+        else:
+            cos, sin = None, None
+            # pos_indices = torch.arange(T, device=x.device).unsqueeze(0).expand(B, T)
+            # x += self.pos_embeddings(pos_indices)
         for layer in self.layers:
             x = layer(x, cos=cos, sin=sin)
         x = self.ln_final(x)
@@ -143,7 +155,7 @@ class BasicsTransformerLM(nn.Module):
             loss = cross_entropy_loss(logits.view(-1, self.vocab_size), y.view(-1))
         else:
             # inference-time mini-optimization: only forward the lm_head on the very last position
-            logits = self.lm_head(x[:, [-1], :])
+            logits = self.lm_head(x[:, [-1], :])  # change to x to pass test
             loss = None
         return logits, loss
     
@@ -151,15 +163,20 @@ class BasicsTransformerLM(nn.Module):
         n_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
         if non_embedding:
             n_params -= self.token_embeddings.weight.numel()
+            if not self.tie_word_embeddings:
+                n_params -= self.lm_head.weight.numel()
+        elif self.tie_word_embeddings:
             n_params -= self.lm_head.weight.numel()
         return n_params
     
     @torch.no_grad()
     def generate(self,
-                 x: torch.Tensor,
+                 input_ids: torch.Tensor,
                  max_new_tokens: int,
                  temperature: float = 1.0,
-                 top_k: int | None = None,
+                 top_k: int | None = 50,
+                 top_p: float | None = 0.9,
+                 repetition_penalty: float = 1.0,
                  eos_token_id: int | None = None) -> torch.LongTensor:
         """
         Args:
@@ -171,86 +188,109 @@ class BasicsTransformerLM(nn.Module):
                 Temperature to use during generation.
             top_k: int
                 If provided, only sample from the `top_k` vocab items (by probability).
+            top_p: float
+                If provided, only sample from the smallest set of vocab items with cumulative probability >= top_p.
+            repetition_penalty: float
+                Penalty to apply to repeated tokens (1.0 = no penalty, >1.0 = penalty).
             eos_token_id: int
                 If provided, stop generation when we generate this ID.
 
         Returns: A LongTensor of shape (max_new_tokens,) with the generated model output.
         """
-        if x.dim() == 1:
-            x = x.unsqueeze(0)
-
-        ori_seq_len = x.size(-1)
+        if input_ids.dim() == 1:
+            input_ids = input_ids.unsqueeze(0)
+        
+        idx = input_ids
         for _ in range(max_new_tokens):
-            # Always padding left, thus model see meaning token at right side
-            logits, _ = self.forward(x[:, -self.context_length:] if x.size(-1) > self.context_length else x)
-            next_token_logits = logits[:, -1]
-            temp_scaled_next_token_logits = next_token_logits / temperature
-            if top_k:
-                topk_values, _ = torch.topk(temp_scaled_next_token_logits,
-                                            k=min(top_k, temp_scaled_next_token_logits.size(-1)))
-                threshold = topk_values[:, -1]
-                topk_mask = temp_scaled_next_token_logits < threshold
-                temp_scaled_next_token_logits.masked_fill_(topk_mask, float("-inf"))
-            next_token_prob = softmax(temp_scaled_next_token_logits, dim=-1)
-            # sample from a multinomial with model generated probability
-            next_token_id = torch.multinomial(next_token_prob, 1)
-            if eos_token_id is not None and next_token_id.item() == eos_token_id:
-                break
-            x = torch.cat((x, next_token_id), dim=-1)
-        new_token_ids = x[:, ori_seq_len:]
-        return new_token_ids
+            idx_cond = idx if idx.size(1) <= self.context_length else idx[:, -self.context_length:]
+            logits, _ = self(idx_cond)
+            logits = logits[:, -1, :]
+            
+            if repetition_penalty != 1.0:
+                score = logits.gather(1, idx)
+                score = torch.where(score < 0, score * repetition_penalty, score / repetition_penalty)
+                logits.scatter_(1, idx, score)
+            
+            if temperature != 1.0:
+                logits = logits / temperature
+
+            if top_k is not None:
+                v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
+                logits[logits < v[:, [-1]]] = -float('Inf')
+            
+            if top_p is not None and top_p < 1.0:
+                sorted_logits, sorted_indices = torch.sort(logits, descending=True)
+                cumulative_probs = torch.cumsum(softmax(sorted_logits, dim=-1), dim=-1)
+                
+                # Remove tokens with cumulative probability above the threshold
+                sorted_indices_to_remove = cumulative_probs > top_p
+                # Shift the indices to the right to keep also the first token above the threshold
+                sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
+                sorted_indices_to_remove[..., 0] = 0
+                
+                indices_to_remove = sorted_indices_to_remove.scatter(1, sorted_indices, sorted_indices_to_remove)
+                logits[indices_to_remove] = -float('Inf')
+
+            probs = softmax(logits, dim=-1)
+            idx_next = torch.multinomial(probs, num_samples=1)
+            idx = torch.cat((idx, idx_next), dim=1)
+            
+            if eos_token_id is not None:
+                if idx_next.item() == eos_token_id:
+                    break
+        return idx
     
-    @torch.no_grad()
-    def generate_async(self,
-                       prompt: str,
-                       max_new_tokens: int,
-                       tokenizer: BPETokenizer,
-                       temperature: float = 1.0,
-                       top_k: Optional[int] = None,
-                       stop_tokens: Optional[list[str]] = None) -> AsyncGenerator[str, None]:
-        input_ids = tokenizer.encode(prompt)
-        x = torch.tensor([input_ids], device=self.device).to(torch.int64)
+    # @torch.no_grad()
+    # def generate_async(self,
+    #                    prompt: str,
+    #                    max_new_tokens: int,
+    #                    tokenizer: BPETokenizer,
+    #                    temperature: float = 1.0,
+    #                    top_k: Optional[int] = None,
+    #                    stop_tokens: Optional[list[str]] = None) -> AsyncGenerator[str, None]:
+    #     input_ids = tokenizer.encode(prompt)
+    #     x = torch.tensor([input_ids], device=self.device).to(torch.int64)
         
-        ori_seq_len = x.size(-1)
-        generated_tokens = []
-        stop_token_ids = []
-        if stop_tokens:
-            for token in stop_tokens:
-                token_ids = tokenizer.encode(token)
-                stop_token_ids.append(token_ids)
+    #     ori_seq_len = x.size(-1)
+    #     generated_tokens = []
+    #     stop_token_ids = []
+    #     if stop_tokens:
+    #         for token in stop_tokens:
+    #             token_ids = tokenizer.encode(token)
+    #             stop_token_ids.append(token_ids)
         
-        eos_token_id = getattr(self.tokenizer, 'eos_token_id', None)
+    #     eos_token_id = getattr(self.tokenizer, 'eos_token_id', None)
         
         
-        # 开始生成
-        for step in range(max_new_tokens):
-            # 让出控制权，实现真正的异步
-            await asyncio.sleep(0)
+    #     # 开始生成
+    #     for step in range(max_new_tokens):
+    #         # 让出控制权，实现真正的异步
+    #         await asyncio.sleep(0)
             
-            logits, _ = self.forward(x[:, -self.context_length:] if x.size(-1) > self.context_length else x)
-            next_token_logits = logits[:, -1]
-            temp_scaled_next_token_logits = next_token_logits / temperature
-            if top_k:
-                topk_values, _ = torch.topk(temp_scaled_next_token_logits,
-                                            k=min(top_k, temp_scaled_next_token_logits.size(-1)))
-                threshold = topk_values[:, -1]
-                topk_mask = temp_scaled_next_token_logits < threshold
-                temp_scaled_next_token_logits.masked_fill_(topk_mask, float("-inf"))
-            next_token_prob = softmax(temp_scaled_next_token_logits, dim=-1)
-            # sample from a multinomial with model generated probability
-            next_token_id = torch.multinomial(next_token_prob, 1)
-            token_id = next_token_id.item()
+    #         logits, _ = self.forward(x[:, -self.context_length:] if x.size(-1) > self.context_length else x)
+    #         next_token_logits = logits[:, -1]
+    #         temp_scaled_next_token_logits = next_token_logits / temperature
+    #         if top_k:
+    #             topk_values, _ = torch.topk(temp_scaled_next_token_logits,
+    #                                         k=min(top_k, temp_scaled_next_token_logits.size(-1)))
+    #             threshold = topk_values[:, -1]
+    #             topk_mask = temp_scaled_next_token_logits < threshold
+    #             temp_scaled_next_token_logits.masked_fill_(topk_mask, float("-inf"))
+    #         next_token_prob = softmax(temp_scaled_next_token_logits, dim=-1)
+    #         # sample from a multinomial with model generated probability
+    #         next_token_id = torch.multinomial(next_token_prob, 1)
+    #         token_id = next_token_id.item()
             
-            generated_tokens.append(token_id)
-            new_text = self.tokenizer.decode([token_id])
-            yield new_text
+    #         generated_tokens.append(token_id)
+    #         new_text = self.tokenizer.decode([token_id])
+    #         yield new_text
             
-            if eos_token_id is not None and token_id == eos_token_id:
-                break
-            if stop_token_ids and token_id in stop_token_ids:
-                break
+    #         if eos_token_id is not None and token_id == eos_token_id:
+    #             break
+    #         if stop_token_ids and token_id in stop_token_ids:
+    #             break
             
-            x = torch.cat((x, next_token_id), dim=-1)
+    #         x = torch.cat((x, next_token_id), dim=-1)
     
     @classmethod
     def from_pretrained(cls, pretrained_model_path: str):

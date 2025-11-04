@@ -1,0 +1,26 @@
+{
+    "测试1：检查模型是否真的'理解'了prompt": [
+        ["具体爱好", "Tom and Lily were friends who loved baking cookies. One afternoon they"],
+        ["具体情感", "Tom and Lily were friends who hated the rain. When it started pouring, they"]
+    ],
+    "测试2：验证不同长度的prompt": [
+        ["很短", "Tom and Lily"],
+        ["中等", "Tom and Lily were friends."],
+        ["详细", "Tom and Lily were friends who went to the same school and played together every day after class."]
+    ],
+    "测试语法衔接修复": [
+        ["完整动词短语", "Tom and Lily were friends who loved baking. One afternoon they began to"],
+        ["添加频率副词", "Tom and Lily were friends who disliked rain. When storms came, they usually"],
+        ["嵌入式从句结构", "Tom and Lily, who were best friends, always enjoyed"]
+    ],
+    "诊断测试：检查模型对关键信息的关注": [
+        ["测试语义绑定", "Tom and Lily were friends who loved baking. Because they loved baking, they"],
+        ["测试因果推理", "Tom and Lily were friends who disliked rain. Since they disliked rain, when storms came they"],
+        ["测试简单重复（基线测试）", "Tom and Lily were friends. Tom and Lily were friends. Tom and Lily were friends. They"]
+    ],
+    "极度约束的prompt格式": [
+        ["重复关键词", "Tom and Lily were baking experts. They loved making cookies. This afternoon, they started to"],
+        ["属性前置", "Rain haters Tom and Lily always avoided storms. When dark clouds appeared, they immediately"],
+        ["简化结构", "Best friends Tom and Lily had a daily routine: they always enjoyed"]
+    ]
+}

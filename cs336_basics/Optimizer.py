@@ -94,7 +94,8 @@ class AdamW(Optimizer):
                     continue
                 
                 # Perform stepweight decay
-                p.data.mul_(1 - group['lr'] * group['weight_decay'])
+                if group['weight_decay'] > 0:
+                    p.data.add_(p.data, alpha=-group['lr'] * group['weight_decay'])
                 
                 # Get parameter-specific state
                 state = self.state[p]

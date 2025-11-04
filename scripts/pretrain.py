@@ -66,14 +66,23 @@ def get_experiment(run_id: str,
                    workspace: str,
                    resume: bool,
                    is_master_process: bool,
-                   api_key:str="SJASztLoOjQpW2Sakl2PDV4YZ"):
-    experiment_id = hashlib.sha1(run_id.encode("utf-8")).hexdigest()
-    os.environ["COMET_EXPERIMENT_KEY"] = experiment_id
+                   api_key:str="SJASztLoOjQpW2Sakl2PDV4YZ",
+                   experiment_config: dict | None = None):
     if is_master_process and not resume:  # always create a new experiment if not resuming
+        experiment_id = hashlib.sha1(run_id.encode("utf-8")).hexdigest()
+        api = comet.API(api_key=api_key)  # Assumes API key is set in config/env
+        api_experiment = api.get_experiment_by_key(experiment_id)
+        if api_experiment is not None:
+            logger.warning(f"Experiment {run_id} already exists, for not resume mode, a random experiment_key will be used")
+            experiment_id = comet.get_experiment_key(None)
+        os.environ["COMET_EXPERIMENT_KEY"] = experiment_id
+        exp_cfg = comet.ExperimentConfig(**experiment_config) if experiment_config is not None else None
         return comet.start(api_key=api_key,
                            workspace=workspace,
                            project_name=project_name,
-                           experiment_key=experiment_id)
+                           experiment_key=experiment_id,
+                           experiment_config=exp_cfg)
+    experiment_id = os.environ["COMET_EXPERIMENT_KEY"]
     api = comet.API(api_key=api_key)  # Assumes API key is set in config/env
     api_experiment = api.get_experiment_by_key(experiment_id)
 
@@ -202,7 +211,8 @@ def train(model: torch.nn.Module,
                                 workspace="leg-end",
                                 resume=args.resume_checkpoint,
                                 is_master_process=is_master_process,
-                                api_key="SJASztLoOjQpW2Sakl2PDV4YZ")
+                                api_key="SJASztLoOjQpW2Sakl2PDV4YZ",
+                                experiment_config=args.get("experiment_config", None))
                                  
     if args.resume_checkpoint:
         start_iter = load_checkpoint_dist(args.resume_checkpoint,
@@ -218,12 +228,7 @@ def train(model: torch.nn.Module,
     
     pbar = tqdm(range(start_iter, args.train_steps), desc="Training", leave=False, disable=not is_master_process)
     for step in pbar:
-        lr = run_get_lr_cosine_schedule(
-            step, args.lr, args.min_lr, args.warmup_iters, args.cosine_iters
-        )
-        for param_group in optimizer.param_groups:
-            param_group['lr'] = lr
-            
+        optimizer.zero_grad(set_to_none=True)
         for micro_step in range(args.gradient_accumulation_steps):
         
             if is_ddp:
@@ -237,9 +242,12 @@ def train(model: torch.nn.Module,
         
             loss.backward()
         gnorm = clip_grad_norm(model.parameters(), args.clip_grad_norm)
-
+        lr = run_get_lr_cosine_schedule(
+            step, args.lr, args.min_lr, args.warmup_iters, args.cosine_iters
+        )
+        for param_group in optimizer.param_groups:
+            param_group['lr'] = lr
         optimizer.step()
-        optimizer.zero_grad(set_to_none=True)
         
         loss_float = loss.item() * args.gradient_accumulation_steps
         ppl_float = math.exp(loss_float)
@@ -269,14 +277,14 @@ def train(model: torch.nn.Module,
                 model=model,
                 tokenizer=tokenizer,
                 device=device,
-                prompt="Tom and Lily were friends.",  # args.prompt
-                max_new_tokens=64,
-                temperature=1.0,
-                top_k=50
+                prompts=args.prompts,
+                max_new_tokens=args.max_new_tokens,
+                temperature=args.temperature,
+                top_k=args.top_k,
+                top_p=args.top_p,
+                repetition_penalty=args.repetition_penalty
             )
-            msg = f"Input: Tom and Lily were friends.\nOutput: {gen_response}"
-            experiment.log_text(msg, step=step)
-            logger.info(msg)
+            experiment.log_text(gen_response, step=step)
             model.train()
         if is_master_process and (step + 1) % args.save_interval == 0:
             ckpt_name = os.path.join(args.save_path, f"ckpt_iter{step+1}.pt")
@@ -312,30 +320,42 @@ def inference(
     model: BasicsTransformerLM | DDP,
     tokenizer: BPETokenizer,
     device: str | torch.device,
-    prompt: str,
+    prompts: list[str],
     max_new_tokens: int,
     temperature: float,
     top_k: int,
+    top_p: float = 0.9,
+    repetition_penalty: float = 1.0,
 ) -> str:
     if isinstance(model, DDP):
         model = model.module
-    input_ids = tokenizer.encode(prompt)
-    input_tensor = torch.tensor([input_ids], device=device).to(torch.int64)
-    output_tokens = model.generate(
-        input_tensor,
-        max_new_tokens=max_new_tokens,
-        temperature=temperature,
-        top_k=top_k,
-        eos_token_id=tokenizer.eos_token_id
-    )
-    output_ids = output_tokens[0].cpu().numpy().tolist()
-    logger.info(f"[maximum new tokens: {max_new_tokens}] Generated {len(output_ids)} tokens")
-    full_ids = input_ids + output_ids
-    text = tokenizer.decode(full_ids)
-    return text
+    if isinstance(prompts, str):
+        prompts = [prompts]
+    responses = []
+    for prompt in prompts:
+        input_ids = tokenizer.encode(prompt)
+        input_tensor = torch.tensor([input_ids], device=device).to(torch.int64)
+        output_tokens = model.generate(
+            input_tensor,
+            max_new_tokens=max_new_tokens,
+            temperature=temperature,
+            top_k=top_k,
+            top_p=top_p,
+            repetition_penalty=repetition_penalty,
+            eos_token_id=tokenizer.eos_token_id
+        )
+        output_ids = output_tokens[0].cpu().numpy().tolist()
+        text = tokenizer.decode(output_ids)
+        responses.append(text)
+        logger.info(f"[maximum new tokens: {max_new_tokens}] Generated {len(output_ids) - len(input_ids)} tokens")
+        logger.info(f"Input: {prompt}\nOutput: {text}")
+        logger.info("=" * 100)
+    sep = "=" * 100
+    sep = f"\n{sep}\n"
+    return sep.join(responses)
         
 
-@hydra.main(config_path="configs/", config_name="evaluate_cs336_lm", version_base=None)
+@hydra.main(config_path="configs/", config_name="pretrain_qwen2_5", version_base=None)
 def main(cfg: DictConfig):
     training = hasattr(cfg, "training")
     model_config, tokenizer_config = cfg.model, cfg.tokenizer
@@ -363,16 +383,24 @@ def main(cfg: DictConfig):
         ckpt_path = os.path.join(running_config.save_path, f"ckpt_iter{running_config.iteration}.pt")
         iteration = run_load_checkpoint(ckpt_path, model)
         logger.info(f"Loading from checkpoint {iteration} from path {ckpt_path}")
-        gen_response = inference(
-            model=model,
-            tokenizer=tokenizer,
-            device=device,
-            prompt=running_config.prompt,
-            max_new_tokens=running_config.max_new_tokens,
-            temperature=running_config.temperature,
-            top_k=running_config.top_k
-        )
-        logger.info(f"Input: {running_config.prompt}\nOutput: {gen_response}")
+        prompts = running_config.prompts
+        import json
+        prompts = json.load(open(prompts))
+        for test_name, prompt in prompts.items():
+            print(test_name.center(50, "="))
+            for (pname, p) in prompt:
+                gen_response = inference(
+                    model=model,
+                    tokenizer=tokenizer,
+                    device=device,
+                    prompt=p,
+                    max_new_tokens=running_config.max_new_tokens,
+                    temperature=running_config.temperature,
+                    top_k=running_config.top_k,
+                    top_p=running_config.top_p,
+                    repetition_penalty=running_config.repetition_penalty
+                )
+                logger.info(f"[#{pname}] Input: {p}\nOutput: {gen_response}")
     
 
 if __name__ == "__main__":

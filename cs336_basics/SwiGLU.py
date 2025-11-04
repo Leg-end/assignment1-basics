@@ -28,14 +28,14 @@ class SwiGLU(nn.Module):
         super().__init__()
         self.d_model = d_model
         self.d_ff = d_ff
-        self.up_proj = Linear(d_model, d_ff)
-        self.down_proj = Linear(d_ff, d_model)
-        self.gate_proj = Linear(d_model, d_ff)
+        self.w3 = Linear(d_model, d_ff)
+        self.w2 = Linear(d_ff, d_model)
+        self.w1 = Linear(d_model, d_ff)
         
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x, gate = self.up_proj(x), self.gate_proj(x)
+        x, gate = self.w3(x), self.w1(x)
         x = silu(gate) * x
-        x = self.down_proj(x)
+        x = self.w2(x)
         
         return x
     
