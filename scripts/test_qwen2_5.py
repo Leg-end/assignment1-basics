@@ -7,6 +7,8 @@ warnings.filterwarnings("ignore")
 
 from cs336_basics.qwen2_5 import Qwen2_5
 from transformers import AutoTokenizer
+from langchain_core.language_models.llms import LLM
+from langchain_openai import OpenAI
 
 
 if torch.cuda.is_available():

@@ -25,8 +25,8 @@ training:
   compile: false
   save_path: "checkpoints/${exp_name}" # save path for both first train and resume train
   gpu_id: 7
-  lr: 0.001
-  min_lr: 0.0002
+  lr: 0.005
+  min_lr: 0.0005
   weight_decay: 0.01
   beta1: 0.9
   beta2: 0.999
@@ -40,9 +40,12 @@ training:
   val_interval: 100
   val_batches: 20
   prompts:
-  - The hotel’s high-ceilinged lobby resembles that of a ski resort
-  - On the evening of Oct. 12, couples and families dressed
-  - Yang looked up at Blake
+  - Once upon a time
+  - Tom and Lily are friends
+  - Long long ago, there was a monk living in a temple
+  # - The hotel’s high-ceilinged lobby resembles that of a ski resort
+  # - On the evening of Oct. 12, couples and families dressed
+  # - Yang looked up at Blake
   max_new_tokens: 256  # 256 * 4
   temperature: 0.8
   top_k: null

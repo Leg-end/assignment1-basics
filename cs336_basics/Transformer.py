@@ -169,6 +169,45 @@ class BasicsTransformerLM(nn.Module):
             n_params -= self.lm_head.weight.numel()
         return n_params
     
+    def sample(self,
+               input_ids: torch.Tensor,
+               full_ids: torch.Tensor,
+               temperature: float = 1.0,
+               top_k: int | None = 50,
+               top_p: float | None = 0.9,
+               repetition_penalty: float = 1.0) -> torch.LongTensor:
+        logits, _ = self(input_ids)
+        logits = logits[:, -1, :]
+        
+        if repetition_penalty != 1.0:
+            score = logits.gather(1, full_ids)
+            score = torch.where(score < 0, score * repetition_penalty, score / repetition_penalty)
+            logits.scatter_(1, full_ids, score)
+        
+        if temperature != 1.0:
+            logits = logits / temperature
+
+        if top_k is not None:
+            v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
+            logits[logits < v[:, [-1]]] = -float('Inf')
+        
+        if top_p is not None and top_p < 1.0:
+            sorted_logits, sorted_indices = torch.sort(logits, descending=True)
+            cumulative_probs = torch.cumsum(softmax(sorted_logits, dim=-1), dim=-1)
+            
+            # Remove tokens with cumulative probability above the threshold
+            sorted_indices_to_remove = cumulative_probs > top_p
+            # Shift the indices to the right to keep also the first token above the threshold
+            sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
+            sorted_indices_to_remove[..., 0] = 0
+            
+            indices_to_remove = sorted_indices_to_remove.scatter(1, sorted_indices, sorted_indices_to_remove)
+            logits[indices_to_remove] = -float('Inf')
+
+        probs = softmax(logits, dim=-1)
+        idx_next = torch.multinomial(probs, num_samples=1)
+        return idx_next
+    
     @torch.no_grad()
     def generate(self,
                  input_ids: torch.Tensor,
@@ -177,6 +216,7 @@ class BasicsTransformerLM(nn.Module):
                  top_k: int | None = 50,
                  top_p: float | None = 0.9,
                  repetition_penalty: float = 1.0,
+                 stop_token_ids: list[int] | None = None,
                  eos_token_id: int | None = None) -> torch.LongTensor:
         """
         Args:
@@ -203,40 +243,19 @@ class BasicsTransformerLM(nn.Module):
         idx = input_ids
         for _ in range(max_new_tokens):
             idx_cond = idx if idx.size(1) <= self.context_length else idx[:, -self.context_length:]
-            logits, _ = self(idx_cond)
-            logits = logits[:, -1, :]
-            
-            if repetition_penalty != 1.0:
-                score = logits.gather(1, idx)
-                score = torch.where(score < 0, score * repetition_penalty, score / repetition_penalty)
-                logits.scatter_(1, idx, score)
-            
-            if temperature != 1.0:
-                logits = logits / temperature
-
-            if top_k is not None:
-                v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
-                logits[logits < v[:, [-1]]] = -float('Inf')
-            
-            if top_p is not None and top_p < 1.0:
-                sorted_logits, sorted_indices = torch.sort(logits, descending=True)
-                cumulative_probs = torch.cumsum(softmax(sorted_logits, dim=-1), dim=-1)
-                
-                # Remove tokens with cumulative probability above the threshold
-                sorted_indices_to_remove = cumulative_probs > top_p
-                # Shift the indices to the right to keep also the first token above the threshold
-                sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
-                sorted_indices_to_remove[..., 0] = 0
-                
-                indices_to_remove = sorted_indices_to_remove.scatter(1, sorted_indices, sorted_indices_to_remove)
-                logits[indices_to_remove] = -float('Inf')
-
-            probs = softmax(logits, dim=-1)
-            idx_next = torch.multinomial(probs, num_samples=1)
+            idx_next = self.sample(input_ids=idx_cond,
+                                   full_ids=idx,
+                                   temperature=temperature,
+                                   top_k=top_k,
+                                   top_p=top_p,
+                                   repetition_penalty=repetition_penalty)
             idx = torch.cat((idx, idx_next), dim=1)
             
             if eos_token_id is not None:
                 if idx_next.item() == eos_token_id:
+                    break
+            if stop_token_ids is not None:
+                if idx_next.item() in stop_token_ids:
                     break
         return idx
     

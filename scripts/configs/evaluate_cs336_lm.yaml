@@ -11,13 +11,16 @@ eval:
   seed: 1234
   save_path: checkpoints/cs336_lm_TinyStories/
   gpu_id: 7
-  iteration: 5000
-  prompts: "/data/lanyun/worksapce/assignment1-basics/scripts/test_prompts.json"
+  iteration: 2000
+  prompts:
+  - Once upon a time
+  - Tom and Lily are friends
+  - Long long ago, there was a monk living in a temple
   max_new_tokens: 256  # 256 * 4
-  temperature: 0.5
-  top_k: 20
+  temperature: 0.8
+  top_k: null
   top_p: 0.9
-  repetition_penalty: 1.1
+  repetition_penalty: 1.0
 
 model_type: cs336_lm
 model:
@@ -28,8 +31,8 @@ model:
   num_layers: 4
   num_heads: 16
   d_ff: 1344
-  rope_theta: null
-  tie_word_embeddings: true
+  rope_theta: 10000.0
+  tie_word_embeddings: false
 
 dataset_name: TinyStories     # `TinyStories` or `owt`, change as needed
 dataset_split: train          # `train` or `valid`, change as needed

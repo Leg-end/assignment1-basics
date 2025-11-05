@@ -21,6 +21,7 @@ from rich.pretty import pprint as pprint
 from rich.traceback import install
 from torch.distributed import destroy_process_group, init_process_group
 from torch.nn.parallel import DistributedDataParallel as DDP
+from scripts.inference import ChatBot
 
 logger = logging.getLogger(__name__)
 
@@ -355,7 +356,7 @@ def inference(
     return sep.join(responses)
         
 
-@hydra.main(config_path="configs/", config_name="pretrain_qwen2_5", version_base=None)
+@hydra.main(config_path="configs/", config_name="evaluate_cs336_lm", version_base=None)
 def main(cfg: DictConfig):
     training = hasattr(cfg, "training")
     model_config, tokenizer_config = cfg.model, cfg.tokenizer
@@ -384,23 +385,47 @@ def main(cfg: DictConfig):
         iteration = run_load_checkpoint(ckpt_path, model)
         logger.info(f"Loading from checkpoint {iteration} from path {ckpt_path}")
         prompts = running_config.prompts
-        import json
-        prompts = json.load(open(prompts))
-        for test_name, prompt in prompts.items():
-            print(test_name.center(50, "="))
-            for (pname, p) in prompt:
-                gen_response = inference(
-                    model=model,
-                    tokenizer=tokenizer,
-                    device=device,
-                    prompt=p,
-                    max_new_tokens=running_config.max_new_tokens,
-                    temperature=running_config.temperature,
-                    top_k=running_config.top_k,
-                    top_p=running_config.top_p,
-                    repetition_penalty=running_config.repetition_penalty
-                )
-                logger.info(f"[#{pname}] Input: {p}\nOutput: {gen_response}")
+        if isinstance(prompts, str) and os.path.isfile(prompts):
+            import json
+            prompts = json.load(open(prompts))
+        # for test_name, prompt in prompts.items():
+        #     print(test_name.center(50, "="))
+        #     for (pname, p) in prompt:
+        #         gen_response = inference(
+        #             model=model,
+        #             tokenizer=tokenizer,
+        #             device=device,
+        #             prompt=p,
+        #             max_new_tokens=running_config.max_new_tokens,
+        #             temperature=running_config.temperature,
+        #             top_k=running_config.top_k,
+        #             top_p=running_config.top_p,
+        #             repetition_penalty=running_config.repetition_penalty
+        #         )
+        #         logger.info(f"[#{pname}] Input: {p}\nOutput: {gen_response}")
+        chatbot = ChatBot(model=model, tokenizer=tokenizer, device=device)
+        # import shutil
+        # terminal_width = shutil.get_terminal_size().columns
+        from scripts.printer import StreamPrinter
+        printer = StreamPrinter()
+        for prompt in prompts:
+            print("=" * 50)
+            # text = prompt
+            printer.update(prompt)
+            for chunk in chatbot.stream(prompt,
+                                    max_new_tokens=running_config.max_new_tokens,
+                                    temperature=running_config.temperature,
+                                    top_k=running_config.top_k,
+                                    top_p=running_config.top_p,
+                                    repetition_penalty=running_config.repetition_penalty):
+                printer.update(chunk)
+            #     text += chunk
+            #     if len(text) > terminal_width - 5:
+            #         print(f"\r{text[:terminal_width-5]}\n", end="", flush=True)
+            #         text = text[terminal_width-5:]
+            #     print(f"\r{text}", end="", flush=True)
+            # print()
+            printer.complete()
     
 
 if __name__ == "__main__":
