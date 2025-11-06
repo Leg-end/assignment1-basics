@@ -1,3 +1,34 @@
+# What I Have Done
+## - Implement all modules listed in tests/adapter and pass all unit tests
+Most of implementation reference from following repositories, thanks to their great works:
+- [clean-llm](https://github.com/wingAGI/clean-llm/tree/main)
+- [LanguageModeling](https://github.com/eve-liya/LanguageModeling/tree/main)
+## - Pretrain BasicTransformerLM and Qwen2_5 on TinyStories and OpenWebText
+check my pretrain results in [comet panel](https://www.comet.com/leg-end/pretrain/view/new/panels)
+## - NTK-aware RoPE was incorporated in [rope](./cs336_basics/RoPE.py)
+by modifying parameter of context_scale in config file, you can get expanded context length without retraining.  
+Some excellent blogs explaining RoPE helps me lot in understanding the mechanism:
+- [Transformer升级之路：10、RoPE是一种β进制编码](https://spaces.ac.cn/archives/9675)
+- [[通俗易读]无痛理解旋转位置编码RoPE](https://zhuanlan.zhihu.com/p/8306958113)
+## - Further, I pack pretrained LLM as a service which can be accessed through url
+check my service code in [inference.py](./scripts/inference.py)
+the access code is in [client.py](./scripts/client.py)
+To launch a LLM service, use following command:
+```
+uv run scripts/inference.py
+```
+Below is what it should looks like for back-end service:
+![](./assets/pictures/llm_service.png)
+To access the service, use following command (change config or prompt inside the code as your wish):
+```
+uv run scripts/client.py
+```
+Streaming output is supported once you set stream=True, then you can see a real time token-by-token output on terminal, instead of waiting for the whole output.  
+Below is what it should looks like for streaming output:
+<video width="640" height="480" controls poster="./assets/pictures/streaming_output.jpg" autoplay muted>
+    <source src="./assets/video/streaming_output.mp4", type="video/mp4">
+</video>
+
 # CS336 Spring 2025 Assignment 1: Basics
 
 For a full description of the assignment, see the assignment handout at
