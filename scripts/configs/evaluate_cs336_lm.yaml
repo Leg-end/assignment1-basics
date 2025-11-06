@@ -25,8 +25,8 @@ eval:
 model_type: cs336_lm
 model:
   vocab_size: ${vocab_size_map.${dataset_name}}
-  context_length: 256
-  context_scale: 1
+  context_length: 512
+  context_scale: 2
   d_model: 512
   num_layers: 4
   num_heads: 16

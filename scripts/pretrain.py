@@ -357,7 +357,7 @@ def inference(
         
 
 @hydra.main(config_path="configs/", config_name="evaluate_cs336_lm", version_base=None)
-def main(cfg: DictConfig):
+async def main(cfg: DictConfig):
     training = hasattr(cfg, "training")
     model_config, tokenizer_config = cfg.model, cfg.tokenizer
     running_config = cfg.training if training else cfg.eval
@@ -412,7 +412,7 @@ def main(cfg: DictConfig):
             print("=" * 50)
             # text = prompt
             printer.update(prompt)
-            for chunk in chatbot.stream(prompt,
+            async for chunk in chatbot.stream(prompt,
                                     max_new_tokens=running_config.max_new_tokens,
                                     temperature=running_config.temperature,
                                     top_k=running_config.top_k,
