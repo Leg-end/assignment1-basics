@@ -163,7 +163,6 @@ cython_debug/
 *.zip
 
 data/
-assets/
 exps/*.prof
 tokenizers/
 outputs/

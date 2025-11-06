@@ -2,7 +2,9 @@
 ## - Implement all modules listed in tests/adapter and pass all unit tests
 Most of implementation reference from following repositories, thanks to their great works:
 - [clean-llm](https://github.com/wingAGI/clean-llm/tree/main)
-- [LanguageModeling](https://github.com/eve-liya/LanguageModeling/tree/main)
+- [LanguageModeling](https://github.com/eve-liya/LanguageModeling/tree/main)  
+
+I implement 3 versions of BEP training, see comparsion in [here](./exps/runtime.MD)
 ## - Pretrain BasicTransformerLM and Qwen2_5 on TinyStories and OpenWebText
 check my pretrain results in [comet panel](https://www.comet.com/leg-end/pretrain/view/new/panels)
 ## - NTK-aware RoPE was incorporated in [rope](./cs336_basics/RoPE.py)
