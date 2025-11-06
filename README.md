@@ -27,9 +27,7 @@ uv run scripts/client.py
 ```
 Streaming output is supported once you set stream=True, then you can see a real time token-by-token output on terminal, instead of waiting for the whole output.  
 Below is what it should looks like for streaming output:
-<video width="640" height="480" controls poster="./assets/pictures/streaming_output.jpg" autoplay muted>
-    <source src="./assets/video/streaming_output.mp4", type="video/mp4">
-</video>
+![](./assets/pictures/streaming_output.gif)
 
 # CS336 Spring 2025 Assignment 1: Basics
 
