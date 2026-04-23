@@ -4,12 +4,16 @@ import sys
 import os
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 import logging
+import pathlib
+import pstats
 
 from scripts.train_bpe_ori import train_tokenizer as train_tokenizer_ori
 from scripts.train_bpe_fast import train_tokenizer as train_tokenizer_fast
 from scripts.train_bpe_accelerate import train_tokenizer as train_tokenizer_accelerate
 from tests.common import FIXTURES_PATH
-from cs336_basics.Transformer import TransformerLM
+from functools import wraps
+
+SAVE_PATH = (pathlib.Path(__file__).resolve().parent.parent) / "assets"
 
 import cProfile
 
@@ -29,82 +33,111 @@ def save_to_disk(vocab_path, merge_path, vocab, merges):
     with open(merge_path, "wb") as f:
         pickle.dump(merges, f)
         
+
+def auto_path(param_names: list[str], func, *args, **kwargs):
+    import inspect
+    sig = inspect.signature(func)
+    bound_args = sig.bind(*args, **kwargs)
+    bound_args.apply_defaults()
+    path_parts = []
+    for param_name in param_names:
+        if param_name in bound_args.arguments:
+            value = bound_args.arguments[param_name]
+            # 处理不同类型的参数值
+            if isinstance(value, (int, float, str, bool)):
+                value_str = str(value)
+                if '/' in value_str:
+                    value_str = os.path.splitext(os.path.basename(value_str))[0]
+                elif '.' in value_str:
+                    value_str = os.path.splitext(value_str)[0]
+            elif hasattr(value, '__name__'):  # 函数/类名
+                value_str = value.__name__
+            else:
+                value_str = type(value).__name__
+            path_parts.append(f"{param_name}_{value_str}")
+    path = '-'.join(path_parts)
+    return path
+
+
+def profile_decorator(*param_names, save: bool = True):
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            prof = cProfile.Profile()
+            try:
+                result = prof.runcall(func, *args, **kwargs)
+                return result
+            finally:
+                if save:
+                    profile_dir = SAVE_PATH / "profile_baseline"
+                    os.makedirs(profile_dir, exist_ok=True)
+                    name = auto_path(param_names, func, *args, **kwargs)
+                    profile_path = profile_dir / f"{name}.prof"
+                    prof.dump_stats(profile_path)
+                stas = pstats.Stats(prof)
+                stas.sort_stats('cumtime')
+                stas.print_stats(10)
+        return wrapper
+    return decorator
+    
+
+@profile_decorator("alg", "corpus")
+def train_bpe(alg: str,
+              corpus: str,
+              vocab_size: int,
+              special_tokens: list[str] = ["<|endoftext|>"],
+              save: bool = False,
+              **kwargs):
+    input_path = FIXTURES_PATH / corpus
+    if alg.startswith("ori"):
+        train_func = train_tokenizer_ori
+    elif alg == "fast":
+        train_func = train_tokenizer_fast
+    elif alg == "accelerate":
+        train_func = train_tokenizer_accelerate
+    else:
+        raise ValueError(f"Unsupported algorithm: {alg}")
+    start_time = time.time()
+    vocab, merges = train_func(
+        input_path=input_path,
+        vocab_size=vocab_size,
+        special_tokens=special_tokens,
+        **kwargs
+    )
+    end_time = time.time()
+    print(f"Finish training in {end_time - start_time:.2f}s")
+    if save:
+        corpus = os.path.splitext(os.path.basename(corpus))[0]
+        save_dir = SAVE_PATH / "tokenizer"
+        save_to_disk(save_dir/f"{alg}_{corpus}_bpe_vocab.pkl",
+                     save_dir/f"{alg}_{corpus}_bpe_merges.pkl",
+                     vocab, merges)
         
-def train_bpe_ori():
-    input_path = FIXTURES_PATH / "corpus.en"
-    _, _ = train_tokenizer_ori(
-        input_path=input_path,
-        vocab_size=500,
-        special_tokens=["<|endoftext|>"],
-    )
 
-
-def train_bpe_fast():
-    input_path = FIXTURES_PATH / "corpus.en"
-    _, _ = train_tokenizer_fast(
-        input_path=input_path,
-        vocab_size=500,
-        special_tokens=["<|endoftext|>"],
-    )
-    
-def train_bpe_accelerate():
-    input_path = FIXTURES_PATH / "corpus.en"
-    _, _ = train_tokenizer_accelerate(
-        input_path=input_path,
-        vocab_size=500,
-        special_tokens=["<|endoftext|>"],
-    )
-
-
-def train_bpe_tinystories_ori():
-    input_path = "/data/lanyun/worksapce/assignment1-basics/data/TinyStoriesV2-GPT4-train.txt"
-    start_time = time.time()
-    vocab, merges = train_tokenizer_ori(
-        input_path=input_path,
-        vocab_size=10000,
-        special_tokens=["<|endoftext|>"],
-        num_chunks=8,
-        num_process=8
-    )
-    end_time = time.time()
-    print(f"Finish training in {end_time - start_time:.2f}s")
-    save_to_disk("/data/lanyun/worksapce/assignment1-basics/assets/tokenizer/ori/tinystories_bpe_vocab.pkl",
-                 "/data/lanyun/worksapce/assignment1-basics/assets/tokenizer/ori/tinystories_bpe_merges.pkl",
-                 vocab, merges)
-    
-    
-def train_bpe_tinystories_fast():
-    input_path = "/data/lanyun/worksapce/assignment1-basics/data/TinyStoriesV2-GPT4-train.txt"
-    start_time = time.time()
-    vocab, merges = train_tokenizer_fast(
-        input_path=input_path,
-        vocab_size=10000,
-        special_tokens=["<|endoftext|>"],
-        num_chunks=8,
-        num_process=8
-    )
-    end_time = time.time()
-    print(f"Finish training in {end_time - start_time:.2f}s")
-    save_to_disk("/data/lanyun/worksapce/assignment1-basics/assets/tokenizer/fast/tinystories_bpe_vocab.pkl",
-                 "/data/lanyun/worksapce/assignment1-basics/assets/tokenizer/fast/tinystories_bpe_merges.pkl",
-                 vocab, merges)
-    
-
-def train_bpe_tinystories_accelerate():
-    input_path = "/data/lanyun/worksapce/assignment1-basics/data/TinyStoriesV2-GPT4-train.txt"
-    start_time = time.time()
-    vocab, merges = train_tokenizer_accelerate(
-        input_path=input_path,
-        vocab_size=10000,
-        special_tokens=["<|endoftext|>"],
-        num_chunks=8,
-        num_process=8
-    )
-    end_time = time.time()
-    print(f"Finish training in {end_time - start_time:.2f}s")
-    save_to_disk("/data/lanyun/worksapce/assignment1-basics/assets/tokenizer/accelerate/tinystories_bpe_vocab.pkl",
-                 "/data/lanyun/worksapce/assignment1-basics/assets/tokenizer/accelerate/tinystories_bpe_merges.pkl",
-                 vocab, merges)
+def main():
+    corpus_params = {
+        "corpus.en": {
+            "vocab_size": 500,
+            "num_chunks": 4,
+            "num_processes": 8
+        },
+        "TinyStories/TinyStoriesV2-GPT4-train.txt": {
+            "vocab_size": 10000,
+            "num_chunks": 32,
+            "num_processes": 8
+        },
+        # "owt/owt_train.txt": {
+        #     "vocab_size": 32000,
+        #     "num_chunks": 32,
+        #     "num_processes": 8
+        # }
+    }
+    for alg_name in ["ori_heapq"]:
+        for corpus_path in corpus_params:
+            print(f"alg = {alg_name}, corpus = {corpus_path}".center(50, "="))
+            train_bpe(alg=alg_name,
+                      corpus=corpus_path,
+                      **corpus_params[corpus_path])
     
 
 def debug():
@@ -163,11 +196,11 @@ def debug():
     
 
 if __name__ == "__main__":
+    main()
     # config_logging()
     # train_bpe_ori()
     # debug()
     # train_bpe_tinystories()
-    import pstats
     # cProfile.run('train_bpe_tinystories_ori()', filename="/data/lanyun/worksapce/assignment1-basics/exps/tokenize_tinystories_heapdict.prof")
     # print("heapdict".center(50, "="))
     # p = pstats.Stats("/data/lanyun/worksapce/assignment1-basics/exps/tokenize_tinystories_heapdict.prof")
@@ -176,10 +209,10 @@ if __name__ == "__main__":
     # print("link".center(50, "="))
     # p = pstats.Stats("/data/lanyun/worksapce/assignment1-basics/exps/tokenize_tinystories_link.prof")
     # p.sort_stats('cumtime').print_stats(10)
-    cProfile.run('train_bpe_tinystories_accelerate()', filename="/data/lanyun/worksapce/assignment1-basics/exps/tokenize_tinystories_link_heap.prof")
-    print("link heap".center(50, "="))
-    p = pstats.Stats("/data/lanyun/worksapce/assignment1-basics/exps/tokenize_tinystories_link_heap.prof")
-    p.sort_stats('cumtime').print_stats(10)
+    # cProfile.run('train_bpe_tinystories_accelerate()', filename="/data/lanyun/worksapce/assignment1-basics/exps/tokenize_tinystories_link_heap.prof")
+    # print("link heap".center(50, "="))
+    # p = pstats.Stats("/data/lanyun/worksapce/assignment1-basics/exps/tokenize_tinystories_link_heap.prof")
+    # p.sort_stats('cumtime').print_stats(10)
     # lm = TransformerLM(vocab_size=50257,
     #                    context_length=1024,
     #                    num_layers=48,
