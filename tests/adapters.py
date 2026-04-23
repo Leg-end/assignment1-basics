@@ -20,7 +20,7 @@ from cs336_basics.Loss import cross_entropy_loss
 from cs336_basics.Optimizer import AdamW
 from cs336_basics.Tokenizer import BPETokenizer
 from cs336_basics.nn_utils import clip_grad_norm
-from scripts.train_bpe_fast import train_tokenizer
+from scripts.train_bpe_fast import BPETrainerFast
 
 
 
@@ -700,4 +700,8 @@ def run_train_bpe(
                 representing that <token1> was merged with <token2>.
                 Merges are ordered by order of creation.
     """
-    return train_tokenizer(input_path, vocab_size, special_tokens, **kwargs)
+    trainer = BPETrainerFast(special_tokens=special_tokens)
+    vocab, merges = trainer.train(input_path=input_path,
+                                  vocab_size=vocab_size,
+                                  **kwargs)
+    return vocab, merges

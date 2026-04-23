@@ -90,13 +90,11 @@ def pretokenize(text: str,
 class BPETrainer:
     
     def __init__(self,
-                 special_tokens: list[str],
-                 num_chunks: int = 4,
+                 num_chunk: int = 4,
                  num_counter: int = 8,
                  num_merger: int = 4,
                  do_monitor: bool = False):
-        self.special_tokens = special_tokens
-        self.num_chunks = num_chunks
+        self.num_chunk = num_chunk
         self.num_counter = num_counter
         self.num_merger = num_merger
         self.do_monitor = do_monitor
@@ -107,9 +105,9 @@ class BPETrainer:
                                special_tokens: list[str]):
         while True:
             chunk = chunk_queue.get()
-            chunk = chunk.decode("utf-8", errors="ignore")
             if chunk == None:
                 break
+            chunk = chunk.decode("utf-8", errors="ignore")
             counter = Counter(pretokenize(chunk, special_tokens))
             counter_queue.put(counter)
             
@@ -220,14 +218,14 @@ class BPETrainer:
               input_path: str | os.PathLike,
               vocab_size: int,
               special_tokens: list[str],
-              num_chunks: int = 4,
+              num_chunk: int = 4,
               num_counter: int = 8,
               num_merger: int = 1,
               do_monitor: bool = False) -> tuple[dict[int, bytes], list[tuple[bytes, bytes]]]:
         if not os.path.exists(input_path):
             raise FileExistsError(f"{input_path} not exist!")
-        special_tokens = special_tokens or self.special_tokens
-        num_chunks = num_chunks or self.num_chunks
+        self.special_tokens = special_tokens
+        num_chunk = num_chunk or self.num_chunk
         num_counter = num_counter or self.num_counter
         num_merger = num_merger or self.num_merger
         do_monitor = do_monitor or self.do_monitor
@@ -248,7 +246,7 @@ class BPETrainer:
         word_counts = BPETrainer._pretokenize_and_count(
             input_path=input_path,
             special_tokens=special_tokens,
-            num_chunk=num_chunks,
+            num_chunk=num_chunk,
             num_counter=num_counter,
             num_merger=num_merger,
             do_monitor=do_monitor)
