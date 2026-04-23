@@ -1,14 +1,17 @@
 from typing import Iterable
-from typing import BinaryIO, Iterable, Generator
+from typing import BinaryIO, Iterable, Generator, Optional
 from tqdm import tqdm
+from multiprocessing.synchronize import Event
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from collections import Counter
+import multiprocessing as mp
+import time
 import os
 import regex as re
 import numpy as np
 
 
 PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
-
 
 
 def find_chunk_boundaries(file: BinaryIO,
@@ -61,8 +64,8 @@ def split_by_special_tokens(text: str,
     else:
         pat = "|".join(map(re.escape, special_tokens_sorted))
         return re.split(f"({pat})", text)
-
-
+    
+    
 def pretokenize(text: str,
                 special_tokens: list[str],
                 drop_special_tokens: bool = True) -> Generator[bytes, None, None]:
@@ -83,6 +86,184 @@ def pretokenize(text: str,
                 if word:
                     yield word.encode("utf-8")
 
+
+class BPETrainer:
+    
+    def __init__(self,
+                 special_tokens: list[str],
+                 num_chunks: int = 4,
+                 num_counter: int = 8,
+                 num_merger: int = 4,
+                 do_monitor: bool = False):
+        self.special_tokens = special_tokens
+        self.num_chunks = num_chunks
+        self.num_counter = num_counter
+        self.num_merger = num_merger
+        self.do_monitor = do_monitor
+    
+    @staticmethod
+    def _chunk_counter_process(chunk_queue: mp.Queue,
+                               counter_queue: mp.Queue,
+                               special_tokens: list[str]):
+        while True:
+            chunk = chunk_queue.get()
+            chunk = chunk.decode("utf-8", errors="ignore")
+            if chunk == None:
+                break
+            counter = Counter(pretokenize(chunk, special_tokens))
+            counter_queue.put(counter)
+            
+    @staticmethod       
+    def _merge_counter_process(counter_queue: mp.Queue,
+                               merged_queue: mp.Queue):
+        merged_counter = Counter()
+        while True:
+            counter = counter_queue.get()
+            if counter == None:
+                break
+            merged_counter.update(counter)
+        merged_queue.put(merged_counter)
+        
+    @staticmethod
+    def _queue_monitor_process(chunk_queue: mp.Queue,
+                               counter_queue: mp.Queue,
+                               merged_queue: mp.Queue,
+                               event: Event):
+        while not event.is_set():
+            print(f"chunk queue: {chunk_queue.qsize()}, counter_queue: {counter_queue.qsize()}, merged_queue: {merged_queue.qsize()}")
+            time.sleep(10)
+        
+    @staticmethod
+    def _read_chunk_streaming(input_path: str | os.PathLike,
+                              num_chunk: int = 4) -> Generator[bytes, None, None]:
+        """
+        Read file as generator of chunks, avoiding loading all file into memory.
+        """
+        with open(input_path, 'rb') as f:
+            boundaries = find_chunk_boundaries(f, num_chunk, "<|endoftext|>".encode("utf-8"))
+            for i, (start, end) in enumerate(zip(boundaries[:-1], boundaries[1:])):
+                f.seek(start)
+                # Faster when transfering between processes with byte data
+                yield f.read(end - start)
+                        
+    @staticmethod
+    def _pretokenize_and_count(input_path: str | os.PathLike,
+                               special_tokens: list[str],
+                               num_chunk: int = 4,
+                               num_counter: int = 8,
+                               num_merger: int = 4,
+                               do_monitor: bool = False):
+        if num_counter is None:
+            num_counter = mp.cpu_count()
+        num_counter = min(num_counter, num_chunk)
+        chunk_queue = mp.Queue(maxsize=1_000_000)
+        counter_queue = mp.Queue(maxsize=1_000_000)
+        merged_queue = mp.Queue(maxsize=num_merger)
+        
+        counter_processes = []
+        for i in range(num_counter):
+            p = mp.Process(target=BPETrainer._chunk_counter_process,
+                           args=(chunk_queue, counter_queue, special_tokens),
+                           name=f"counter_process_{i+1}")
+            p.start()
+            counter_processes.append(p)
+            
+        merge_processes = []
+        for i in range(num_merger):
+            p = mp.Process(target=BPETrainer._merge_counter_process,
+                           args=(counter_queue, merged_queue),
+                           name=f"merge_process_{i+1}")
+            p.start()
+            merge_processes.append(p)
+            
+        if do_monitor:
+            stop_event = mp.Event()
+            monitor_process = mp.Process(target=BPETrainer._queue_monitor_process,
+                                         args=(chunk_queue, counter_queue, merged_queue, stop_event))
+            monitor_process.start()
+        
+        for chunk in BPETrainer._read_chunk_streaming(input_path, num_chunk):
+            chunk_queue.put(chunk)
+        # 发送终止信号（每个消费者一个None）
+        for _ in range(num_counter):
+            chunk_queue.put(None)
+            
+        for p in counter_processes:
+            p.join()
+            
+        for _ in range(num_merger):
+            counter_queue.put(None)
+            
+        # use main process to merge into final counter
+        word_counts = merged_queue.get()
+        if num_merger > 1:
+            for _ in range(num_merger - 1):
+                counter = merged_queue.get()
+                word_counts.update(counter)
+        
+        for p in merge_processes:
+            p.join()
+            
+        if do_monitor:
+            stop_event.set()
+            monitor_process.join()
+            
+        return word_counts
+    
+    def get_merging_rules(self,
+                          vocab: dict[int, bytes],
+                          word_freq: dict[bytes, int],
+                          num_merge: int) -> list[tuple[bytes, bytes]]:
+        raise NotImplementedError("Subclass must implement this method")
+    
+    def train(self,
+              input_path: str | os.PathLike,
+              vocab_size: int,
+              special_tokens: list[str],
+              num_chunks: int = 4,
+              num_counter: int = 8,
+              num_merger: int = 1,
+              do_monitor: bool = False) -> tuple[dict[int, bytes], list[tuple[bytes, bytes]]]:
+        if not os.path.exists(input_path):
+            raise FileExistsError(f"{input_path} not exist!")
+        special_tokens = special_tokens or self.special_tokens
+        num_chunks = num_chunks or self.num_chunks
+        num_counter = num_counter or self.num_counter
+        num_merger = num_merger or self.num_merger
+        do_monitor = do_monitor or self.do_monitor
+        
+        begin = time.time()
+        
+        # Step 1: Initialize Vocabulary
+        vocab = {i: bytes([i]) for i in range(256)}
+        for i, token in enumerate(special_tokens):
+            token = token.encode("utf-8")
+            if token not in vocab.values():
+                vocab[256 + i] = token
+        middle = time.time()
+        print(f"Time taken before chunk and pretokenizatiuon: {middle - begin:.2f} s")
+        begin = middle
+                
+        # Step 2: Chunk, parallelizing pre-tokenization and counting
+        word_counts = BPETrainer._pretokenize_and_count(
+            input_path=input_path,
+            special_tokens=special_tokens,
+            num_chunk=num_chunks,
+            num_counter=num_counter,
+            num_merger=num_merger,
+            do_monitor=do_monitor)
+        middle = time.time()
+        print(f"Chunk, pre-tokenization and word counting done in {middle - begin:.2f} s")
+        begin = middle
+        
+        # Step 3: Generate merging rules
+        num_merge = max(vocab_size - len(special_tokens) - 256, 0)
+        merges = self.get_merging_rules(vocab, word_counts, num_merge)
+        end = time.time()
+        print(f"Merging done in {end - begin:.2f} s")
+        
+        return vocab, merges
+    
 
 def get_pairs(word: tuple[str | bytes]) -> set[tuple[str, str] | tuple[bytes, bytes]]:
     """

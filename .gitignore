@@ -162,7 +162,7 @@ cython_debug/
 .ruff_cache/
 *.zip
 
-data/
+assets/data/
 exps/*.prof
 tokenizers/
 outputs/

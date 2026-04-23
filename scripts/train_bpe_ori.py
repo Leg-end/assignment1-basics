@@ -1,14 +1,8 @@
-import os
-import time
-import logging
-import heapq
-from collections import defaultdict, Counter
-from collections import defaultdict, Counter
-from multiprocessing import Pool
+from collections import defaultdict
+from collections import defaultdict
 from tqdm import tqdm
 from cs336_basics.maxheapdict import heapdict
-from cs336_basics.Tokenizer import find_chunk_boundaries
-from .train_bpe_fast import worker, PQItem
+from cs336_basics.Tokenizer import BPETrainer
 
 # adapt from https://github.com/Spectual/stanford-cs336-a1/blob/main/cs336_basics/BPETokenizer.py
 
@@ -157,127 +151,50 @@ def bpe_merge(pair_freq: dict[tuple[int, int], int],
     # TODO 定期清理频率为0的pair
     return update_pairs
 
-def train_tokenizer(
-    input_path: str | os.PathLike,
-    vocab_size: int,
-    special_tokens: list[str],
-    num_processes: int = 4,
-    num_chunks: int = 4,
-) -> tuple[dict[int, bytes], list[tuple[bytes, bytes]]]:
-    """Given the path to an input corpus, run train a BPE tokenizer and
-    output its vocabulary and merges.
 
-    Args:
-        input_path (str | os.PathLike): Path to BPE tokenizer training data.
-        vocab_size (int): Total number of items in the tokenizer's vocabulary (including special tokens).
-        special_tokens (list[str]): A list of string special tokens to be added to the tokenizer vocabulary.
-            These strings will never be split into multiple tokens, and will always be
-            kept as a single token. If these special tokens occur in the `input_path`,
-            they are treated as any other string.
-
-    Returns:
-        tuple[dict[int, bytes], list[tuple[bytes, bytes]]]:
-            vocab:
-                The trained tokenizer vocabulary, a mapping from int (token ID in the vocabulary)
-                to bytes (token bytes)
-            merges:
-                BPE merges. Each list item is a tuple of bytes (<token1>, <token2>),
-                representing that <token1> was merged with <token2>.
-                Merges are ordered by order of creation.
-    """
-    begin = time.time()
+class BPETrainerOri(BPETrainer):
     
-    # Step 1: Initialize Vocabulary
-    vocab = {i: bytes([i]) for i in range(256)}
-    for i, token in enumerate(special_tokens):
-        token = token.encode("utf-8")
-        if token not in vocab.values():
-            vocab[256 + i] = token
+    def get_merging_rules(self,
+                          vocab: dict[int, bytes],
+                          word_freq: dict[bytes, int],
+                          num_merge: int) -> list[tuple[bytes, bytes]]:
+        pair_freq: dict[tuple[int, int], int] = defaultdict(int)
+        pair2wids: dict[tuple[int, int], dict[int, int]] = defaultdict(dict)
+        wid_freq: dict[int, int] = defaultdict(int)
+        words = []
+        k = 0
+        for word, cnt in tqdm(word_freq.items(), desc="Generating merging rules", leave=True):
+            if len(word) < 2:
+                continue  # skip single-letter word
+            wid_freq[k] = cnt
+            words.append(word)
+            for idx1, idx2 in zip(word[:-1], word[1:]):
+                pair_freq[(idx1, idx2)] += cnt
+                if k not in pair2wids[(idx1, idx2)]:
+                    pair2wids[(idx1, idx2)][k] = 1
+                else:
+                    pair2wids[(idx1, idx2)][k] += 1
+            k += 1
+                
+        heap = heapdict()
+        for pair, freq in pair_freq.items():
+            heap[pair] = (freq, (vocab[pair[0]], vocab[pair[1]]))
 
-    # Step 2: Chunk the text file
-    chunk_args = []
-    with open(input_path, 'rb') as f:
-        boundaries = find_chunk_boundaries(f, num_chunks, "<|endoftext|>".encode("utf-8"))
-        for i, (start, end) in enumerate(zip(boundaries[:-1], boundaries[1:])):
-            f.seek(start)
-            chunk_args.append((f.read(end - start).decode("utf-8", errors="ignore"), special_tokens))
-    middle = time.time()
-    print(f"Time taken before pretokenizatiuon: {middle - begin:.2f} s")
-    begin = middle
+        pbar = tqdm(total=num_merge, desc="Merging", leave=True)
+        merges = []
+        for i in range(num_merge):
+            if not heap:
+                break
             
-    # Step 3: Parallelizing Pre-tokenization and Counting
-    if num_processes is None:
-        num_processes = min(cpu_count(), 8)
-    num_processes = min(num_processes, len(chunk_args))
-    word_freq = Counter()
-    with Pool(processes=num_processes) as pool:
-        print(f"Starting pre-tokenization with {num_processes} processes on {len(chunk_args)} chunks...")
-        result_iter = pool.imap_unordered(worker, chunk_args)
-        for counter in tqdm(result_iter, total=len(chunk_args), desc="Pre-tokenization", leave=True):
-            word_freq.update(counter)
-    middle = time.time()
-    print(f"Pre-tokenization and word counting done in {middle - begin:.2f} s")
-    begin = middle
-
-    # Step 4: Generate merging rules
-    pair_freq: dict[tuple[int, int], int] = defaultdict(int)
-    pair2wids: dict[tuple[int, int], dict[int, int]] = defaultdict(dict)
-    wid_freq: dict[int, int] = defaultdict(int)
-    words = []
-    k = 0
-    for word, cnt in tqdm(word_freq.items(), desc="Generating merging rules", leave=True):
-        if len(word) < 2:
-            continue  # skip single-letter word
-        wid_freq[k] = cnt
-        words.append(word)
-        for idx1, idx2 in zip(word[:-1], word[1:]):
-            pair_freq[(idx1, idx2)] += cnt
-            if k not in pair2wids[(idx1, idx2)]:
-                pair2wids[(idx1, idx2)][k] = 1
-            else:
-                pair2wids[(idx1, idx2)][k] += 1
-        k += 1
+            max_pair, _ = heap.popitem()  # no zombie elements
             
-    heap = heapdict()
-    for pair, freq in pair_freq.items():
-        heap[pair] = (freq, (vocab[pair[0]], vocab[pair[1]]))
-    # pq = [PQItem(freq, pair, (vocab[pair[0]], vocab[pair[1]])) 
-    #       for pair, freq in pair_freq.items()]
-    # heapq.heapify(pq)
-
-    num_merges = max(vocab_size - len(special_tokens) - 256, 0)
-    pbar = tqdm(total=num_merges, desc="Merging", leave=True)
-    merges = []
-    for i in range(num_merges):
-        if not heap:
-            break
-        
-        max_pair, _ = heap.popitem()  # no zombie elements
-        # if not pq:
-        #     break
-        
-        # max_pair = None
-        # while pq:
-        #     item = heapq.heappop(pq)
-        #     if item.id_pair not in pair_freq:
-        #         continue
-        #     if pair_freq[item.id_pair] == item.freq:
-        #         max_pair = item.id_pair
-        #         break
-        # if max_pair is None:
-        #     break
-        
-        new_idx = 256 + len(special_tokens) + i
-        idx1, idx2 = max_pair
-        vocab[new_idx] = vocab[idx1] + vocab[idx2]  # merge into new token
-        merges.append((vocab[idx1], vocab[idx2]))
-        update_pairs = bpe_merge_fast(pair_freq, pair2wids, wid_freq, words, max_pair, new_idx)
-        for pair in update_pairs:
-            heap[pair] = (pair_freq[pair], (vocab[pair[0]], vocab[pair[1]]))
-        # for pair in update_pairs:
-        #     heapq.heappush(pq, PQItem(pair_freq[pair], pair, (vocab[pair[0]], vocab[pair[1]])))
-        pbar.update(1)
-    pbar.close()
-    end = time.time()
-    print(f"Merging done in {end - begin:.2f} s")
-    return vocab, merges
+            new_idx = 256 + len(self.special_tokens) + i
+            idx1, idx2 = max_pair
+            vocab[new_idx] = vocab[idx1] + vocab[idx2]  # merge into new token
+            merges.append((vocab[idx1], vocab[idx2]))
+            update_pairs = bpe_merge_fast(pair_freq, pair2wids, wid_freq, words, max_pair, new_idx)
+            for pair in update_pairs:
+                heap[pair] = (pair_freq[pair], (vocab[pair[0]], vocab[pair[1]]))
+            pbar.update(1)
+        pbar.close()
+        return merges
