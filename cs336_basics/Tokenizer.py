@@ -4,6 +4,7 @@ from tqdm import tqdm
 from multiprocessing.synchronize import Event
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from collections import Counter
+from queue import Empty
 import multiprocessing as mp
 import time
 import os
@@ -90,14 +91,15 @@ def pretokenize(text: str,
 class BPETrainer:
     
     def __init__(self,
-                 num_chunk: int = 4,
-                 num_counter: int = 8,
-                 num_merger: int = 4,
-                 do_monitor: bool = False):
-        self.num_chunk = num_chunk
-        self.num_counter = num_counter
-        self.num_merger = num_merger
-        self.do_monitor = do_monitor
+                 vocab_size: Optional[int] = None,
+                 special_tokens: Optional[list[str]] = None):
+        self.vocab_size = vocab_size
+        self.special_tokens = special_tokens
+    
+    @staticmethod
+    def _counter_worker(chunk: bytes, special_tokens: list[str]) -> Counter:
+        chunk = chunk.decode("utf-8", errors="ignore")
+        return Counter(pretokenize(chunk, special_tokens))
     
     @staticmethod
     def _chunk_counter_process(chunk_queue: mp.Queue,
@@ -113,100 +115,135 @@ class BPETrainer:
             
     @staticmethod       
     def _merge_counter_process(counter_queue: mp.Queue,
-                               merged_queue: mp.Queue):
+                               merged_queue: mp.Queue,
+                               timeout: int = 5):
         merged_counter = Counter()
-        while True:
-            counter = counter_queue.get()
-            if counter == None:
-                break
-            merged_counter.update(counter)
+        active = True
+        while active:
+            try:
+                counter = counter_queue.get(timeout=timeout)
+                if counter is None:
+                    break
+                merged_counter.update(counter)
+            except Empty:
+                # 超时但可能还有数据，继续等待
+                continue
         merged_queue.put(merged_counter)
         
     @staticmethod
-    def _queue_monitor_process(chunk_queue: mp.Queue,
-                               counter_queue: mp.Queue,
+    def _queue_monitor_process(counter_queue: mp.Queue,
                                merged_queue: mp.Queue,
-                               event: Event):
+                               event: Event,
+                               interval: int = 10):
         while not event.is_set():
-            print(f"chunk queue: {chunk_queue.qsize()}, counter_queue: {counter_queue.qsize()}, merged_queue: {merged_queue.qsize()}")
-            time.sleep(10)
-        
-    @staticmethod
-    def _read_chunk_streaming(input_path: str | os.PathLike,
-                              num_chunk: int = 4) -> Generator[bytes, None, None]:
+            try:
+                c_size = counter_queue.qsize()
+                m_size = merged_queue.qsize()
+                print(f"[Monitor] counter_queue: {c_size}, merged_queue: {m_size}")
+            except Exception as e:
+                print(f"[Monitor] Error: {e}")
+            time.sleep(interval)
+            
+    def pretokenize_and_count_pool(
+        self,
+        chunk_generator: Generator[bytes, None, None],
+        num_chunk: int,
+        num_counter_process: int,
+        chunksize: int) -> Counter:
         """
-        Read file as generator of chunks, avoiding loading all file into memory.
+        Counter进程: [=====工作=====] [======工作======] [======工作======]
+        Merger进程:                                   [等待] [====合并====]
+                            ↑ 严重延迟 ↑
+        问题：Merger必须等所有Counter完成才能开始工作
+        Pool则必须通过pickle序列化/IPC通信/反序列化这三个步骤实现两个进程的数据传递
         """
-        with open(input_path, 'rb') as f:
-            boundaries = find_chunk_boundaries(f, num_chunk, "<|endoftext|>".encode("utf-8"))
-            for i, (start, end) in enumerate(zip(boundaries[:-1], boundaries[1:])):
-                f.seek(start)
-                # Faster when transfering between processes with byte data
-                yield f.read(end - start)
-                        
-    @staticmethod
-    def _pretokenize_and_count(input_path: str | os.PathLike,
-                               special_tokens: list[str],
-                               num_chunk: int = 4,
-                               num_counter: int = 8,
-                               num_merger: int = 4,
-                               do_monitor: bool = False):
-        if num_counter is None:
-            num_counter = mp.cpu_count()
-        num_counter = min(num_counter, num_chunk)
-        chunk_queue = mp.Queue(maxsize=1_000_000)
-        counter_queue = mp.Queue(maxsize=1_000_000)
-        merged_queue = mp.Queue(maxsize=num_merger)
+         # 优化 chunksize 以改善负载均衡
+        optimal_chunksize = max(1, num_chunk // (num_counter_process * 4))
+        chunksize = chunksize or optimal_chunksize
+        print(f"Using chunksize={chunksize} for load balancing")
+            
+        # 准备 worker 函数（绑定 special_tokens）
+        from functools import partial
+        counter_worker = partial(self._counter_worker, special_tokens=self.special_tokens)
+                
+        with mp.Pool(processes=num_counter_process) as pool:
+            count_iter = pool.imap_unordered(counter_worker, chunk_generator, chunksize=chunksize)
+            word_freq = Counter()
+            for counter in tqdm(count_iter, total=num_chunk, desc="Megering counter", leave=True):
+                word_freq.update(counter)
+                
+        return word_freq
+    
+    
+    def pretokenize_and_count_pipeline(
+        self,
+        chunk_generator: Generator[bytes, None, None],
+        num_chunk: int,
+        num_counter_process: int,
+        num_merger_process: int,
+        do_monitor: bool) -> Counter:
+        """
+        Process(在Linux默认)是使用fork来创建进程的，子进程直接继承父进程的地址空间，所以免去了进程间的数据拷贝
+        更适合大文件,高并发场景
+        Counter进程: [工作] [工作] [工作] [工作] [工作] [工作]
+        Merger进程:  [合并] [合并] [合并] [合并] [合并] [合并]
+                            ↑ 时间重叠 ↑
+        注意：fork的方式启动进程虽然比spawn更快，但是在多线程环境会存在很多问题。根据文档，如果主进程使用了多线程
+        就会存在死锁的问题
+        """
+        chunk_queue = mp.Queue(maxsize=max(1000, num_chunk * 2))
+        counter_queue = mp.Queue(maxsize=max(1000, num_chunk * 2))
+        merged_queue = mp.Queue(maxsize=num_merger_process)
         
         counter_processes = []
-        for i in range(num_counter):
+        for i in range(num_counter_process):
             p = mp.Process(target=BPETrainer._chunk_counter_process,
-                           args=(chunk_queue, counter_queue, special_tokens),
-                           name=f"counter_process_{i+1}")
+                           args=(chunk_queue, counter_queue, self.special_tokens),
+                           name=f"Counter-{i+1}")
             p.start()
             counter_processes.append(p)
             
         merge_processes = []
-        for i in range(num_merger):
+        for i in range(num_merger_process):
             p = mp.Process(target=BPETrainer._merge_counter_process,
                            args=(counter_queue, merged_queue),
-                           name=f"merge_process_{i+1}")
+                           name=f"Merger-{i+1}")
             p.start()
             merge_processes.append(p)
             
         if do_monitor:
             stop_event = mp.Event()
             monitor_process = mp.Process(target=BPETrainer._queue_monitor_process,
-                                         args=(chunk_queue, counter_queue, merged_queue, stop_event))
+                                         args=(counter_queue, merged_queue, stop_event))
             monitor_process.start()
         
-        for chunk in BPETrainer._read_chunk_streaming(input_path, num_chunk):
+        for chunk in chunk_generator:
             chunk_queue.put(chunk)
         # 发送终止信号（每个消费者一个None）
-        for _ in range(num_counter):
+        for _ in range(num_counter_process):
             chunk_queue.put(None)
             
         for p in counter_processes:
             p.join()
             
-        for _ in range(num_merger):
+        for _ in range(num_merger_process):
             counter_queue.put(None)
             
         # use main process to merge into final counter
         word_counts = merged_queue.get()
-        if num_merger > 1:
-            for _ in range(num_merger - 1):
-                counter = merged_queue.get()
-                word_counts.update(counter)
+        if num_merger_process > 1:
+            for _ in tqdm(range(num_merger_process - 1), desc="Megering counter", leave=True):
+                word_counts.update(merged_queue.get())
         
         for p in merge_processes:
-            p.join()
+            p.join(timeout=10)
             
         if do_monitor:
             stop_event.set()
-            monitor_process.join()
+            monitor_process.join(timeout=5)
             
         return word_counts
+        
     
     def get_merging_rules(self,
                           vocab: dict[int, bytes],
@@ -216,19 +253,36 @@ class BPETrainer:
     
     def train(self,
               input_path: str | os.PathLike,
-              vocab_size: int,
-              special_tokens: list[str],
+              vocab_size: Optional[int] = None,
+              special_tokens: Optional[list[str]] = None,
               num_chunk: int = 4,
-              num_counter: int = 8,
-              num_merger: int = 1,
-              do_monitor: bool = False) -> tuple[dict[int, bytes], list[tuple[bytes, bytes]]]:
+              num_counter_process: int = 8,
+              num_merger_process: int = 1,
+              do_monitor: bool = False,
+              chunksize: Optional[int] = None) -> tuple[dict[int, bytes], list[tuple[bytes, bytes]]]:
+        """
+        训练 BPE 模型
+        
+        Args:
+            input_path: 输入文件路径
+            vocab_size: 词表大小
+            special_tokens: 特殊 token 列表
+            num_chunk: 文件分块数量
+            num_counter_process: 计数进程数
+            num_merger_process: 合并进程数（1表示主进程合并）
+            do_monitor: 是否启用队列监控
+            chunksize: 每个进程处理的 chunk 数量（负载均衡）
+        """
         if not os.path.exists(input_path):
             raise FileExistsError(f"{input_path} not exist!")
+        vocab_size = vocab_size or self.vocab_size
+        if vocab_size is None:
+            raise ValueError("vocab_size must be specified! Either through arguments or constructor.")
+        special_tokens = special_tokens or self.special_tokens
+        if special_tokens is None:
+            raise ValueError("special_tokens must be specified! Either through arguments or constructor.")
+        self.vocab_size = vocab_size
         self.special_tokens = special_tokens
-        num_chunk = num_chunk or self.num_chunk
-        num_counter = num_counter or self.num_counter
-        num_merger = num_merger or self.num_merger
-        do_monitor = do_monitor or self.do_monitor
         
         begin = time.time()
         
@@ -238,25 +292,59 @@ class BPETrainer:
             token = token.encode("utf-8")
             if token not in vocab.values():
                 vocab[256 + i] = token
+        
+        # Step 2: Chunk the text file
+        with open(input_path, 'rb') as f:
+            boundaries = find_chunk_boundaries(f, num_chunk, "<|endoftext|>".encode("utf-8"))
+        num_chunk = len(boundaries) - 1
+        print(f"Split file into {num_chunk} chunks")
+        
+        def _chunk_generator() -> Generator[bytes, None, None]:
+            """
+            Read file as generator of chunks, avoiding loading all file into memory.
+            """
+            with open(input_path, 'rb') as f:
+                for i, (start, end) in enumerate(zip(boundaries[:-1], boundaries[1:])):
+                    f.seek(start)
+                    # Faster when transfering between processes with byte data
+                    yield f.read(end - start)
         middle = time.time()
-        print(f"Time taken before chunk and pretokenizatiuon: {middle - begin:.2f} s")
+        print(f"Time taken before pre-tokenization: {middle - begin:.2f} s")
         begin = middle
                 
-        # Step 2: Chunk, parallelizing pre-tokenization and counting
-        word_counts = BPETrainer._pretokenize_and_count(
-            input_path=input_path,
-            special_tokens=special_tokens,
-            num_chunk=num_chunk,
-            num_counter=num_counter,
-            num_merger=num_merger,
-            do_monitor=do_monitor)
+        # Step 3: Parallelizing Pre-tokenization and Counting
+        if num_counter_process is None:
+            num_counter_process = min(mp.cpu_count(), 8)
+        num_counter_process = min(num_counter_process, num_chunk)
+        num_merger_process = max(min(num_merger_process, num_chunk // 2), 1)
+        
+        print(f"Starting pre-tokenization with {num_counter_process} processes on {num_chunk} chunks...")
+        print(f"Merging with {num_merger_process} processes on {num_chunk} counters...")
+        if num_counter_process == 1:  # 单chunk时直接顺序处理，避免多进程开销
+            chunk = next(_chunk_generator())
+            word_freq = Counter(pretokenize(chunk.decode("utf-8", errors="ignore"), self.special_tokens))
+        elif num_merger_process == 1:  # 方法一：Pool模式 + 主进程合并（高效简洁）
+            word_freq = self.pretokenize_and_count_pool(
+                chunk_generator=_chunk_generator(),
+                num_chunk=num_chunk,
+                num_counter_process=num_counter_process,
+                chunksize=chunksize)
+        else:  # 方法二：Pipeline模式 + 多进程合并（流水线并行）
+            word_freq = self.pretokenize_and_count_pipeline(
+                chunk_generator=_chunk_generator(),
+                num_chunk=num_chunk,
+                num_counter_process=num_counter_process,
+                num_merger_process=num_merger_process,
+                do_monitor=do_monitor)
+            
         middle = time.time()
-        print(f"Chunk, pre-tokenization and word counting done in {middle - begin:.2f} s")
+        print(f"Pre-tokenization and word counting done in {middle - begin:.2f} s")
+        print(f"Total unique tokens: {len(word_freq)}")
         begin = middle
         
-        # Step 3: Generate merging rules
+        # Step 4: Generate merging rules
         num_merge = max(vocab_size - len(special_tokens) - 256, 0)
-        merges = self.get_merging_rules(vocab, word_counts, num_merge)
+        merges = self.get_merging_rules(vocab, word_freq, num_merge)
         end = time.time()
         print(f"Merging done in {end - begin:.2f} s")
         

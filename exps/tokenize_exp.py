@@ -16,6 +16,7 @@ import pathlib
 import pstats
 
 SAVE_PATH = (pathlib.Path(__file__).resolve().parent.parent) / "assets"
+DEBUG_MODE = False
 
 def config_logging():
     logger = logging.getLogger()  # root logger
@@ -34,32 +35,46 @@ def save_to_disk(vocab_path, merge_path, vocab, merges):
         pickle.dump(merges, f)
         
 
-def auto_path(param_names: list[str], func, *args, **kwargs):
+def auto_path(param_names: list[str | tuple[str, str]], func, *args, **kwargs):
     import inspect
     sig = inspect.signature(func)
     bound_args = sig.bind(*args, **kwargs)
     bound_args.apply_defaults()
     path_parts = []
     for param_name in param_names:
+        if isinstance(param_name, tuple):
+            param_name, alias = param_name
+        else:
+            alias = param_name
         if param_name in bound_args.arguments:
             value = bound_args.arguments[param_name]
-            # 处理不同类型的参数值
-            if isinstance(value, (int, float, str, bool)):
-                value_str = str(value)
-                if '/' in value_str:
-                    value_str = os.path.splitext(os.path.basename(value_str))[0]
-                elif '.' in value_str:
-                    value_str = os.path.splitext(value_str)[0]
-            elif hasattr(value, '__name__'):  # 函数/类名
-                value_str = value.__name__
+        else:
+            # 如果参数不在 bound_args 中，尝试从函数签名获取默认值
+            param = sig.parameters.get(param_name)
+            if param and param.default is not inspect.Parameter.empty:
+                value = param.default
             else:
-                value_str = type(value).__name__
-            path_parts.append(f"{param_name}_{value_str}")
+                # 如果没有默认值且未提供，跳过该参数
+                continue
+        # 处理不同类型的参数值
+        if isinstance(value, (int, float, str, bool)):
+            value_str = str(value)
+            if '/' in value_str:
+                value_str = os.path.splitext(os.path.basename(value_str))[0]
+            elif '.' in value_str:
+                value_str = os.path.splitext(value_str)[0]
+        elif hasattr(value, '__name__'):  # 函数/类名
+            value_str = value.__name__
+        else:
+            value_str = type(value).__name__
+        path_parts.append(f"{alias}_{value_str}")
     path = '-'.join(path_parts)
     return path
         
         
 def profile_decorator(*param_names, save: bool = True):
+    if not DEBUG_MODE:
+        return lambda func: func
     def decorator(func):
         @wraps(func)
         def wrapper(*args, **kwargs):
@@ -97,7 +112,7 @@ def profile_context(name: str, save: bool = True):
         stas.sort_stats('cumtime')
         stas.print_stats(10)
         
-@profile_decorator("alg", "corpus")
+@profile_decorator("alg", "corpus", ("num_merger_process", "M"))
 def train_bpe(alg: str,
               corpus: str,
               vocab_size: int,
@@ -105,38 +120,47 @@ def train_bpe(alg: str,
               save: bool = False,
               **kwargs):
     input_path = FIXTURES_PATH / corpus
-    trainer = get_bpe_trainer(alg, **kwargs)
-    vocab, merges = trainer.train(input_path, vocab_size, special_tokens)
+    trainer = get_bpe_trainer(alg,
+                              vocab_size=vocab_size,
+                              special_tokens=special_tokens)
+    vocab, merges = trainer.train(input_path, **kwargs)
     if save:
         corpus = os.path.splitext(os.path.basename(corpus))[0]
         save_dir = SAVE_PATH / "tokenizer"
+        os.makedirs(save_dir, exist_ok=True)
         save_to_disk(save_dir/f"{alg}_{corpus}_bpe_vocab.pkl",
                      save_dir/f"{alg}_{corpus}_bpe_merges.pkl",
                      vocab, merges)
         
 
 def main():
+    DEBUG_MODE = False
     corpus_params = {
         # "corpus.en": {
         #     "vocab_size": 500,
         #     "num_chunk": 4,
-        #     "num_counter": 8
+        #     "num_counter_process": 8
         # },
-        "TinyStories/TinyStoriesV2-GPT4-train.txt": {
-            "vocab_size": 10000,
-            "num_chunk": 32,
-            "num_counter": 8
-        },
-        # "owt/owt_train.txt": {
-        #     "vocab_size": 32000,
+        # "TinyStories/TinyStoriesV2-GPT4-train.txt": {
+        #     "vocab_size": 10000,
         #     "num_chunk": 32,
-        #     "num_counter": 8
-        # }
+        #     "num_counter_process": 8,
+        #     "num_merger_process": 8,
+        # },
+        "owt/owt_train.txt": {
+            "vocab_size": 32000,
+            "num_chunk": 256,
+            "num_counter_process": 64,
+            "num_merger_process": 64,
+        }
     }
-    for alg_name in ["ori", "fast", "accelerate"]:
+    algs = ["fast"]  #["ori", "fast", "accelerate"]
+    for alg_name in algs:
         for corpus_path in corpus_params:
+            print(f"alg = {alg_name}, corpus = {corpus_path}".center(50, "="))
             train_bpe(alg=alg_name,
                       corpus=corpus_path,
+                      save=True,
                       **corpus_params[corpus_path])
     
 
