@@ -1,11 +1,13 @@
 from .train_bpe_ori import BPETrainerOri, BPETrainer
 from .train_bpe_fast import BPETrainerFast
 from .train_bpe_accelerate import BPETrainerAcc
+from .train_bpe_cpp import BPETrainerCPP
 
 BPE_TRAINERS = {
     "ori": BPETrainerOri,
     "fast": BPETrainerFast,
-    "accelerate": BPETrainerAcc
+    "accelerate": BPETrainerAcc,
+    "cpp": BPETrainerCPP
 }
 
 def get_bpe_trainer(name: str,

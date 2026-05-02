@@ -168,3 +168,5 @@ exps/*.prof
 tokenizers/
 outputs/
 checkpoints/
+lib_train_bpe/
+cpp_scripts/build/

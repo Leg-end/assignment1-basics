@@ -141,20 +141,20 @@ def main():
         #     "num_chunk": 4,
         #     "num_counter_process": 8
         # },
-        # "TinyStories/TinyStoriesV2-GPT4-train.txt": {
-        #     "vocab_size": 10000,
-        #     "num_chunk": 32,
-        #     "num_counter_process": 8,
-        #     "num_merger_process": 8,
-        # },
-        "owt/owt_train.txt": {
-            "vocab_size": 32000,
-            "num_chunk": 256,
-            "num_counter_process": 64,
-            "num_merger_process": 64,
-        }
+        "TinyStories/TinyStoriesV2-GPT4-train.txt": {
+            "vocab_size": 10000,
+            "num_chunk": 32,
+            "num_counter_process": 8,
+            "num_merger_process": 8,
+        },
+        # "owt/owt_train.txt": {
+        #     "vocab_size": 32000,
+        #     "num_chunk": 256,
+        #     "num_counter_process": 64,
+        #     "num_merger_process": 64,
+        # }
     }
-    algs = ["fast"]  #["ori", "fast", "accelerate"]
+    algs = ["cpp"]  #["ori", "fast", "accelerate"]
     for alg_name in algs:
         for corpus_path in corpus_params:
             print(f"alg = {alg_name}, corpus = {corpus_path}".center(50, "="))
