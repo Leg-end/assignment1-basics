@@ -116,11 +116,11 @@ class BasicsTransformerLM(nn.Module):
         self.rope_theta = rope_theta
         self.tie_word_embeddings = tie_word_embeddings
         if rope_theta is not None:
-            self.pos_embeddings = RotaryEmbedding(d_model // num_heads, rope_theta, context_length,
+            self.rope = RotaryEmbedding(d_model // num_heads, rope_theta, context_length,
                                         context_scale=context_scale)
         else:
-            # self.pos_embeddings = Embedding(context_length, d_model)
-            self.pos_embeddings = None
+            # self.rope = Embedding(context_length, d_model)
+            self.rope = None
         self.token_embeddings = Embedding(vocab_size, d_model)
         self.layers = nn.ModuleList([
             TransformerBlock(
@@ -142,11 +142,11 @@ class BasicsTransformerLM(nn.Module):
         B, T = x.shape
         x = self.token_embeddings(x)
         if self.rope_theta is not None:
-            cos, sin = self.pos_embeddings.get_cosin(T)
+            cos, sin = self.rope.get_cosin(T)
         else:
             cos, sin = None, None
             # pos_indices = torch.arange(T, device=x.device).unsqueeze(0).expand(B, T)
-            # x += self.pos_embeddings(pos_indices)
+            # x += self.rope(pos_indices)
         for layer in self.layers:
             x = layer(x, cos=cos, sin=sin)
         x = self.ln_final(x)
@@ -158,16 +158,6 @@ class BasicsTransformerLM(nn.Module):
             logits = self.lm_head(x[:, [-1], :])  # change to x to pass test
             loss = None
         return logits, loss
-    
-    def get_num_params(self, non_embedding=True):
-        n_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
-        if non_embedding:
-            n_params -= self.token_embeddings.weight.numel()
-            if not self.tie_word_embeddings:
-                n_params -= self.lm_head.weight.numel()
-        elif self.tie_word_embeddings:
-            n_params -= self.lm_head.weight.numel()
-        return n_params
     
     def sample(self,
                input_ids: torch.Tensor,
@@ -331,6 +321,17 @@ class BasicsTransformerLM(nn.Module):
         return model
     
     
+    def get_num_params(self, non_embedding=True):
+        n_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
+        if non_embedding:
+            n_params -= self.token_embeddings.weight.numel()
+            if not self.tie_word_embeddings:
+                n_params -= self.lm_head.weight.numel()
+        elif self.tie_word_embeddings:
+            n_params -= self.lm_head.weight.numel()
+        return n_params
+    
+    
     def get_FLOPS(self):
         """
         FLOPs: one multiplication or one addition is counted as 1 FLOP
@@ -360,8 +361,7 @@ class BasicsTransformerLM(nn.Module):
         flops_per_token = 6 * N + 12 * L * H * Q * T
         return flops_per_token * T
     
-    
-    def get_mem(self, dtype=torch.float16):
+    def get_mem(self, dtype=torch.float16) -> float:
         unit = torch.finfo(dtype).bits // 8
         return self.get_num_params() * unit
     

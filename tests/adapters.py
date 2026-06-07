@@ -457,7 +457,7 @@ def run_get_batch(
         is the sampled input sequences, and the second tuple item is the corresponding
         language modeling labels.
     """
-    starting_idxs = torch.randint(len(dataset) - context_length, (batch_size,))
+    starting_idxs = torch.randint(len(dataset) - context_length - 1, (batch_size,))
     x = torch.stack([
             torch.from_numpy((dataset[i : i + context_length]).astype(np.int64))
             for i in starting_idxs
@@ -595,7 +595,7 @@ def run_save_checkpoint(
 
 
 def run_load_checkpoint(
-    src: str | os.PathLike | BinaryIO | IO[bytes],
+    src: str | os.PathLike | BinaryIO | IO[bytes] | dict,
     model: torch.nn.Module,
     optimizer: torch.optim.Optimizer | None = None,
 ):
@@ -616,6 +616,8 @@ def run_load_checkpoint(
         with open(src, 'rb') as f:
             # Loading to CPU in case of GPU memory issues
             checkpoint = torch.load(f, map_location='cpu', weights_only=False)
+    elif isinstance(src, dict):
+        checkpoint = src
     else:
         checkpoint = torch.load(src, map_location='cpu', weights_only=False)
     model_state_dict = checkpoint['model']

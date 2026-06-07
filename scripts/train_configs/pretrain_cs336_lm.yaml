@@ -8,37 +8,44 @@ dataset_name: TinyStories     # `TinyStories` or `owt`, change as needed
 model_type: cs336_lm
 exp_name: ${model_type}_${dataset_name}
 dat_dir: ${root_dir}/data/${dataset_name}/dat
+total_tokens: 32000
 
 vocab_size_map:
   TinyStories: 10_000
   owt: 32_000
 
-training:
-  train_data_path: ${dat_dir}/train.dat
-  valid_data_path: ${dat_dir}/valid.dat
+paths:
+  train_bin: ${dat_dir}/train.bin
+  valid_bin: ${dat_dir}/valid.bin
+  model_output: "checkpoints/${exp_name}" # save path for both first train and resume train
+  tokenizer_dir: ${root_dir}/tokenizers/${dataset_name}_train # save path for tokenizer
 
-  run_id: Pretrain-Baseline-LLM-Pre-Norm-RoPE
-  experiment_config:
-    name: ${exp_name}
+training:
+  enable: True
   seed: 1234
-  dtype: float32
-  compile: false
-  save_path: "checkpoints/${exp_name}" # save path for both first train and resume train
-  gpu_id: 0
+  dtype: bfloat16
+  train_batch_size: 128
+  eval_batch_size: 128
+  train_steps: 2000
+  gradient_accumulation_steps: 1
+  compile: True
+  eval_iterations: 100
+  eval_interval: 20
+  max_grad_norm" 1.0
+  device: cuda
   lr: 0.001
   min_lr: 0.0002
+  warmup_ratio: 0.03  # 100
   weight_decay: 0.01
   beta1: 0.9
   beta2: 0.999
   eps: 1e-8
-  batch_size: 96
-  context_length: 256
-  train_steps: 2000
-  clip_grad_norm: 1.0
-  warmup_iters: 100
-  cosine_iters: 2000
-  val_interval: 100
-  val_batches: 20
+  log_interval: 20
+  save_checkpoints: false
+  resume_checkpoint: null   # load checkpoint from current hydra run dir
+
+inference:
+  test_infer: True
   prompts:
   - The hotel’s high-ceilinged lobby resembles that of a ski resort
   - On the evening of Oct. 12, couples and families dressed
@@ -48,9 +55,7 @@ training:
   top_k: null
   top_p: 0.9
   repetition_penalty: 1.0
-  save_interval: 500
-  resume_checkpoint: null   # load checkpoint from current hydra run dir
-  gradient_accumulation_steps: 1
+  
 
 model:
   vocab_size: ${vocab_size_map.${dataset_name}}
@@ -61,8 +66,14 @@ model:
   d_ff: 1344
   rope_theta: 10000.0
   tie_word_embeddings: false
-tokenizer_dir: ${root_dir}/tokenizers/${dataset_name}_train # save path for tokenizer
+
 tokenizer:
-  vocab_path: ${tokenizer_dir}/vocab.pkl
-  merges_path: ${tokenizer_dir}/merges.pkl
+  vocab_path: ${paths.${tokenizer_dir}}/vocab.pkl
+  merges_path: ${paths.${tokenizer_dir}}/merges.pkl
   special_tokens: ["<|endoftext|>"]
+
+comet:
+  api_key: SJASztLoOjQpW2Sakl2PDV4YZ
+  project: Pretrain
+  workspace: leg-end
+  run_id: Pretrain-Baseline-LLM-Pre-Norm-RoPE

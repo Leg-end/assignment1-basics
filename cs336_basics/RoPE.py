@@ -22,9 +22,12 @@ def rotate_half(x, original=True):
     return x
 
 
-def apply_rope(q, k, cos, sin, unsqueeze_dim=1, original=True):
-    cos = cos.unsqueeze(unsqueeze_dim)
-    sin = sin.unsqueeze(unsqueeze_dim)
+def apply_rope(q, k, cos, sin, head_dim=1, original=True):
+    """
+    head_dim: dim pos of num head
+    """
+    cos = cos.unsqueeze(head_dim)
+    sin = sin.unsqueeze(head_dim)
     q_embed = (q * cos) + (rotate_half(q, original=original) * sin)
     k_embed = (k * cos) + (rotate_half(k, original=original) * sin)
     return q_embed, k_embed

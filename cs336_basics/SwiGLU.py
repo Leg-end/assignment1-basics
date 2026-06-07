@@ -33,11 +33,7 @@ class SwiGLU(nn.Module):
         self.w1 = Linear(d_model, d_ff)
         
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x, gate = self.w3(x), self.w1(x)
-        x = silu(gate) * x
-        x = self.w2(x)
-        
-        return x
+        return self.w2(silu(self.w1(x)) * self.w3(x))
     
     def get_FLOPS(self, ctx_len):
         w1_flops = 2 * ctx_len * self.d_ff * self.d_model + 2 * ctx_len * self.d_ff

@@ -138,7 +138,7 @@ class Qwen2_5(nn.Module):
                 hidden_size,
                 num_attention_heads,
                 num_key_value_heads,
-                intermediate_size
+                intermediate_size,
             )
             for _ in range(num_hidden_layers)
         ])
@@ -249,35 +249,6 @@ class Qwen2_5(nn.Module):
         elif self.tie_word_embeddings:
             n_params -= self.lm_head.weight.numel()
         return n_params
-        
-    def get_FLOPS(self):
-        """
-        FLOPs: one multiplication or one addition is counted as 1 FLOP
-        Matmul FLOPs: including m * n * p multiplication and m * n * p addition, thus 2 * (m * n * p) FLOPs
-        calculate flops per token = 6 * N + 12 * L * H * Q * T
-            6 * N: matmul per token (for weights)
-                2 * N: forward matrix multiplication (one multiplication and one addition)
-                4 * N: backward matrix multiplication (grads to input and weights)
-                    e.g. Y = XW
-                    2N: dX = dY @ W.T
-                    2N: dW = X.T @ dY
-            12 * L * H * Q * T: self-attention flops T tokens (for tensors)
-                (Note that QKV and O projection already included in N params)
-                per head per layer:
-                    forward:
-                        A = QK^T: L * H * 2 * T * Q * T = 2 * T^2 * Q
-                        O = AV: L * H * 2 * T * T * Q = 2 * T^2 * Q
-                    backward:
-                        dQ = dA @ K; dK = Q.T @ dA: 4 * T^2 * Q
-                        dA = dO @ V.T; dV = A.T @ dO: 4 * T^2 * Q
-                    total: 12 * T^2 * Q
-                Total: 12 * L * H * T^2 * Q
-                Total per token = 12 * L * H * T^2 * Q / T = 12 * L * H * Q * T
-        """
-        N = self.get_num_params()
-        L, H, Q, T = self.num_layes, self.num_heads, self.d_model // self.num_heads, self.context_length
-        flops_per_token = 6 * N + 12 * L * H * Q * T
-        return flops_per_token * T
     
     @classmethod
     def from_config(cls, config: dict):   # <class 'omegaconf.dictconfig.DictConfig'>
@@ -347,6 +318,35 @@ class Qwen2_5(nn.Module):
                     cnt += 1
             print(f"Loaded {cnt} parameters from HF model. with {len(sd_hf)} parameters")
         return model
+    
+    def get_FLOPS(self):
+        """
+        FLOPs: one multiplication or one addition is counted as 1 FLOP
+        Matmul FLOPs: including m * n * p multiplication and m * n * p addition, thus 2 * (m * n * p) FLOPs
+        calculate flops per token = 6 * N + 12 * L * H * Q * T
+            6 * N: matmul per token (for weights)
+                2 * N: forward matrix multiplication (one multiplication and one addition)
+                4 * N: backward matrix multiplication (grads to input and weights)
+                    e.g. Y = XW
+                    2N: dX = dY @ W.T
+                    2N: dW = X.T @ dY
+            12 * L * H * Q * T: self-attention flops T tokens (for tensors)
+                (Note that QKV and O projection already included in N params)
+                per head per layer:
+                    forward:
+                        A = QK^T: L * H * 2 * T * Q * T = 2 * T^2 * Q
+                        O = AV: L * H * 2 * T * T * Q = 2 * T^2 * Q
+                    backward:
+                        dQ = dA @ K; dK = Q.T @ dA: 4 * T^2 * Q
+                        dA = dO @ V.T; dV = A.T @ dO: 4 * T^2 * Q
+                    total: 12 * T^2 * Q
+                Total: 12 * L * H * T^2 * Q
+                Total per token = 12 * L * H * T^2 * Q / T = 12 * L * H * Q * T
+        """
+        N = self.get_num_params()
+        L, H, Q, T = self.num_layes, self.num_heads, self.d_model // self.num_heads, self.context_length
+        flops_per_token = 6 * N + 12 * L * H * Q * T
+        return flops_per_token * T
     
     def get_mem(self, dtype=torch.float16):
         unit = torch.finfo(dtype).bits // 8
