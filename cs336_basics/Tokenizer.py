@@ -475,7 +475,7 @@ class BPETokenizer:
 
 def encode_to_nparray_slow(tokenizer: BPETokenizer,
                            path: str,
-                           save_path: str):
+                           save_path: str) -> int:
     with open(path, "r") as f:
         num_lines = sum(1 for _ in f)
     
@@ -483,9 +483,9 @@ def encode_to_nparray_slow(tokenizer: BPETokenizer,
     with open(path, "r") as f:
         for line in tqdm(f, total=num_lines, desc="Counting tokens"):
             total_tokens += len(tokenizer.encode(line))
-            
-    dtype = np.int32
-    tokens_mm = np.memmap(save_path, dtype=dtype, mode="w+", shape=(total_tokens,))
+    
+    # (can do since enc.max_token_value == 50256 is < 2**16)
+    tokens_mm = np.memmap(save_path, dtype=np.uint16, mode="w+", shape=(total_tokens,))
     
     pos = 0
     with open(path, "r") as f:
@@ -495,10 +495,11 @@ def encode_to_nparray_slow(tokenizer: BPETokenizer,
             tokens_mm[pos:pos+n] = ids
             pos += n
     tokens_mm.flush()
+    return total_tokens
     
 
 def batch_tokenize(batch: list[str],
-                   tokenizer: BPETokenizer):
+                   tokenizer: BPETokenizer) -> np.ndarray:
     out = []
     for line in batch:
         out.extend(tokenizer.encode(line))
@@ -509,39 +510,50 @@ def encode_to_nparray(tokenizer: BPETokenizer,
                       path: str,
                       save_path: str,
                       batch_size: int = 4096,
-                      n_workers: int = 8):
+                      n_workers: int = 8) -> int:
     
     # split into batches
     
-    batches = []
-    with open(path, "r") as f:
-        batch = []
-        for line in f:
-            batch.append(line)
-            if len(batch) == batch_size:
-                batches.append(batch)
-                batch = []
-        if batch:
-            batches.append(batch)
+    def batch_generator(file_path: str, batch_size: int):
+        with open(file_path, "r") as f:
+            batch = []
+            for line in f:
+                batch.append(line)
+                if len(batch) == batch_size:
+                    yield batch
+                    batch = []
+            if batch:
+                yield batch
             
     total_tokens = 0
     results = []
     # multi-processing tokenization
-    with ProcessPoolExecutor(max_workers=n_workers) as exe:
-        futures = []
-        for batch in batches:
-            futures.append(exe.submit(batch_tokenize, batch, tokenizer))
+    with ProcessPoolExecutor(max_workers=n_workers) as executor:
+        # 提交所有任务（生成器会逐个产生batch，不会一次性加载所有数据）
+        futures = {
+            executor.submit(batch_tokenize, batch, tokenizer): idx 
+            for idx, batch in enumerate(batch_generator(path, batch_size))
+        }
+        
+        # 收集结果
         for future in tqdm(as_completed(futures), total=len(futures), desc="Tokenizing"):
-            result = future.result()
-            results.append(result)
-            total_tokens += result.shape[0]
+            tokens = future.result()
+            results.append((futures[future], tokens))  # 保存索引和结果
+            total_tokens += len(tokens)
+            
+    # 按原始顺序排序结果
+    results.sort(key=lambda x: x[0])
     
     # write into memmap
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
-    tokens_mm = np.memmap(save_path, dtype=np.int32, mode="w+", shape=(total_tokens,))
+    # (can do since enc.max_token_value == 50256 is < 2**16)
+    tokens_mm = np.memmap(save_path, dtype=np.uint16, mode="w+", shape=(total_tokens,))
     pos = 0
-    for result in results:
-        tokens_mm[pos:pos+result.shape[0]] = result
-        pos += result.shape[0]
+    for _, tokens in results:
+        tokens_mm[pos:pos+len(tokens)] = tokens
+        pos += len(tokens)
     tokens_mm.flush()
+    # to read the bin files later, e.g. with numpy:
+    # m = np.memmap('train.bin', dtype=np.uint16, mode='r')
+    return total_tokens
     

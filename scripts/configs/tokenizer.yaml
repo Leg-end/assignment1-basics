@@ -1,29 +1,29 @@
 # hydra:
 #   run:
 #     dir: ./my_output_dir  # save outputs to custom dir
-root_dir: ${hydra:runtime.cwd}  # 运行代码的根目录
+root_dir: ${hydra:runtime.cwd}/assets  # 运行代码的根目录
 
 
-dataset_name: TinyStories     # `TinyStories` or `owt`, change as needed
+dataset_name: TinyStoriesV2     # `TinyStoriesV2` or `owt`, change as needed
 dataset_split: train          # `train` or `valid`, change as needed
 
 data_dir: ${root_dir}/data/${dataset_name}
 txt_dir: ${data_dir}/txt
-dat_dir: ${data_dir}/dat
+dat_dir: ${data_dir}/bin
 train_txt_path: ${txt_dir}/train.txt
 valid_txt_path: ${txt_dir}/valid.txt
 
 input_path: ${txt_dir}/${dataset_split}.txt   # txt data for training tokenizer
-train_dat_path: ${dat_dir}/train.dat
-valid_dat_path: ${dat_dir}/valid.dat
+train_dat_path: ${dat_dir}/train.bin
+valid_dat_path: ${dat_dir}/valid.bin
 
-tokenizer_dir: ${root_dir}/tokenizers/${dataset_name}_${dataset_split} # save path for tokenizer
+tokenizer_dir: ${root_dir}/tokenizers/fast/${dataset_name}_${dataset_split} # save path for tokenizer
 vocab_path: ${tokenizer_dir}/vocab.pkl
 merges_path: ${tokenizer_dir}/merges.pkl
 
 
 vocab_size_map:
-  TinyStories: 10_000
+  TinyStoriesV2: 10_000
   owt: 32_000
 
 # 根据 dataset_name 动态设置 vocab_size

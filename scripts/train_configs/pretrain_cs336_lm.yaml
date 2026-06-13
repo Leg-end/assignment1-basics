@@ -2,40 +2,40 @@
 #   run:
 #     dir: ./my_output_dir  # save outputs to custom dir
 
-root_dir: ${hydra:runtime.cwd}
+root_dir: ${hydra:runtime.cwd}/assets
 
-dataset_name: TinyStories     # `TinyStories` or `owt`, change as needed
+dataset_name: TinyStoriesV2     # `TinyStories` or `owt`, change as needed
 model_type: cs336_lm
 exp_name: ${model_type}_${dataset_name}
-dat_dir: ${root_dir}/data/${dataset_name}/dat
-total_tokens: 32000
+dat_dir: ${root_dir}/data/${dataset_name}/bin
 
 vocab_size_map:
-  TinyStories: 10_000
-  owt: 32_000
+  TinyStoriesV2: 10000
+  owt: 32000
 
 paths:
   train_bin: ${dat_dir}/train.bin
   valid_bin: ${dat_dir}/valid.bin
-  model_output: "checkpoints/${exp_name}" # save path for both first train and resume train
-  tokenizer_dir: ${root_dir}/tokenizers/${dataset_name}_train # save path for tokenizer
+  model_output: checkpoints/${exp_name} # save path for both first train and resume train
+  tokenizer_dir: ${root_dir}/tokenizers/fast/${dataset_name}_train # save path for tokenizer
 
 training:
   enable: True
+  total_tokens: 327680000  # batch size × total step count × context length × GPU count × grad accu
   seed: 1234
-  dtype: bfloat16
+  dtype: float32
   train_batch_size: 128
   eval_batch_size: 128
-  train_steps: 2000
+  train_steps: 5000
   gradient_accumulation_steps: 1
-  compile: True
+  compile: false
   eval_iterations: 100
-  eval_interval: 20
-  max_grad_norm" 1.0
+  eval_interval: 500
+  max_grad_norm: 1.0
   device: cuda
   lr: 0.001
   min_lr: 0.0002
-  warmup_ratio: 0.03  # 100
+  warmup_ratio: 0.1  # 100
   weight_decay: 0.01
   beta1: 0.9
   beta2: 0.999
@@ -43,9 +43,9 @@ training:
   log_interval: 20
   save_checkpoints: false
   resume_checkpoint: null   # load checkpoint from current hydra run dir
+  test_infer: True
 
 inference:
-  test_infer: True
   prompts:
   - The hotel’s high-ceilinged lobby resembles that of a ski resort
   - On the evening of Oct. 12, couples and families dressed
@@ -68,12 +68,12 @@ model:
   tie_word_embeddings: false
 
 tokenizer:
-  vocab_path: ${paths.${tokenizer_dir}}/vocab.pkl
-  merges_path: ${paths.${tokenizer_dir}}/merges.pkl
+  vocab_path: ${paths.tokenizer_dir}/vocab.pkl
+  merges_path: ${paths.tokenizer_dir}/merges.pkl
   special_tokens: ["<|endoftext|>"]
 
 comet:
   api_key: SJASztLoOjQpW2Sakl2PDV4YZ
   project: Pretrain
   workspace: leg-end
-  run_id: Pretrain-Baseline-LLM-Pre-Norm-RoPE
+  run_id: Pretrain-Baseline-Trainer

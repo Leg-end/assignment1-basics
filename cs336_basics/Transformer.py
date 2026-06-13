@@ -136,7 +136,7 @@ class BasicsTransformerLM(nn.Module):
             self.token_embeddings.weight = self.lm_head.weight
         
         # report number of parameters
-        logger.info(f"number of non-embedding parameters: {self.get_num_params() / 1e6:.2f}M")
+        logger.info(f"number of non-embedding parameters: {self.get_num_params(non_embedding=True) / 1e6:.2f}M")
         
     def forward(self, x: torch.IntTensor, y: torch.IntTensor | None = None) -> tuple[torch.Tensor, torch.Tensor | None]:
         B, T = x.shape
@@ -321,7 +321,7 @@ class BasicsTransformerLM(nn.Module):
         return model
     
     
-    def get_num_params(self, non_embedding=True):
+    def get_num_params(self, non_embedding=False):
         n_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
         if non_embedding:
             n_params -= self.token_embeddings.weight.numel()
@@ -361,7 +361,7 @@ class BasicsTransformerLM(nn.Module):
         flops_per_token = 6 * N + 12 * L * H * Q * T
         return flops_per_token * T
     
-    def get_mem(self, dtype=torch.float16) -> float:
+    def get_mem(self, dtype: torch.dtype = torch.float16) -> float:
         unit = torch.finfo(dtype).bits // 8
         return self.get_num_params() * unit
     

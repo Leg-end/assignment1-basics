@@ -41,6 +41,11 @@ def get_tokenizer_from_vocab_merges_path(
     merges_path: str | os.PathLike,
     special_tokens: list[str] | None = None,
 ):
+    # if os.path.splitext(vocab_path)[1] != "json":
+    #     tokenizer = BPETokenizer.from_files(vocab_path=vocab_path,
+    #                                     merges_path=merges_path,
+    #                                     special_tokens=special_tokens)
+    #     return tokenizer
     gpt2_byte_decoder = {v: k for k, v in gpt2_bytes_to_unicode().items()}
     with open(vocab_path) as vocab_f:
         gpt2_vocab = json.load(vocab_f)
