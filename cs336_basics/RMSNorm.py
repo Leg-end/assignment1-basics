@@ -25,6 +25,6 @@ class RMSNorm(nn.Module):
     
     def get_FLOPS(self, ctx_len: int) -> int:
         # x.pow.mean: 2LD + 1, +eps, rsqrt: +2
-        rms_flops = 2 * ctx_len * self.d_model + 3
+        rms_flops = 4 * ctx_len * self.d_model + 2
         # matrix multiply: 2LD, scalr multiply: + 1
-        return rms_flops + 2 * ctx_len * self.d_model + 1
+        return rms_flops

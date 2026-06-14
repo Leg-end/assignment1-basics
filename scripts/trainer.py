@@ -86,6 +86,17 @@ def format_time(total_seconds: float) -> str:
     seconds = total_seconds % 60
     
     return f"{int(days)}d {int(hours)}h {int(minutes)}m {seconds:.1f}s"
+
+
+def print_table(info: dict[str, int], unit: int, unit_str: str) -> None:
+    from tabulate import tabulate
+    
+    total = info["Total"]
+    headers = ["Component", "Occupy", "Percentage"]
+    rows = []
+    for k, v in info.items():
+        rows.append([k, f"{v / unit: .2f} {unit_str}", f"{v / total:.2%}"])
+    return tabulate(rows, headers=headers, tablefmt="grid")
         
 
 class Trainer:
@@ -299,9 +310,14 @@ class Trainer:
                        d_model: int,
                        vocab_size: int,
                        d_ff: int,
-                       tie_word_embeddings: bool = False) -> int:
+                       context_length: int,
+                       ffn_type: str = "SwiGLU",
+                       tie_word_embeddings: bool = False,
+                       trainable_pos_embeddings: bool = False) -> int:
         """
+        TODO calculation of parameter number should be done by corresponding model
         Model Parameters (P)
+            Position Embedding: context_length * d_model
             Token Embedding: vocab_size * d_model
             Transformer Block per layer (L layers):
                 Self-Attention(Q, K, V, O): 4 * d_model^2
@@ -313,13 +329,22 @@ class Trainer:
         """
         L = num_layers
         D = d_model
+        T = context_length
         
         emb_param = vocab_size * D
         if not tie_word_embeddings:
             emb_param *= 2
         # Self-Attention(Q, K, V, O) + Feed-Forward + RMSNorm
-        block_param = 4 * D * D + 3 * d_ff * D + 2 * D
+        atten_param = 4 * D * D
+        if ffn_type == "SwiGLU":
+            ffn_param = 3 * d_ff * D
+        else:
+            ffn_param = 2 * d_ff * D
+        norms_param = 2 * D
+        block_param = atten_param + ffn_param + norms_param
         P = emb_param + L * block_param + D
+        if trainable_pos_embeddings:
+            P += T * D
         return P
     
     @staticmethod
@@ -329,43 +354,84 @@ class Trainer:
                        d_ff: int,
                        num_heads: int,
                        context_length: int,
-                       tie_word_embeddings: bool = False) -> int:
+                       batch_size: int = 1,
+                       ffn_type: str = "SwiGLU",
+                       tie_word_embeddings: bool = False,
+                       trainable_pos_embeddings: bool = False,
+                       only_fwd: bool = False) -> int:
         """
         FLOPs: one multiplication or one addition is counted as 1 FLOP
         Matmul FLOPs: including m * n * p multiplication and m * n * p addition, thus 2 * (m * n * p) FLOPs
-        calculate flops per token = 6 * N + 12 * L * H * Q * T
-            6 * N: matmul per token (for weights)
-                2 * N: forward matrix multiplication (one multiplication and one addition)
-                4 * N: backward matrix multiplication (grads to input and weights)
-                    e.g. Y = XW
-                    2N: dX = dY @ W.T
-                    2N: dW = X.T @ dY
-            12 * L * H * Q * T: self-attention flops T tokens (for tensors)
-                (Note that QKV and O projection already included in N params)
-                per head per layer:
-                    forward:
-                        A = QK^T: L * H * 2 * T * Q * T = 2 * T^2 * Q
-                        O = AV: L * H * 2 * T * T * Q = 2 * T^2 * Q
-                    backward:
-                        dQ = dA @ K; dK = Q.T @ dA: 4 * T^2 * Q
-                        dA = dO @ V.T; dV = A.T @ dO: 4 * T^2 * Q
-                    total: 12 * T^2 * Q
-                Total: 12 * L * H * T^2 * Q
-                Total per token = 12 * L * H * T^2 * Q / T = 12 * L * H * Q * T
+        
+        TransformerBlock FLOPs:
+            RMSNorm FLOPs: 2 * (4 * T * D + 2)
+                pow: T * D
+                mean: T * D
+                rsqrt, eps: +2
+                mul: T * D
+                gamma: T * D
+            MHSA FLOPs: 8 * T * D^2 + 2 * T^2 * D + (2 * T^2 * D + 5 * T^2) * H
+                Computing Query, Key, and Value Matrices: 3 * 2 * T * D^2
+                Computing Attention Scores and Output: 2 * T^2 * D + (2 * T^2 * D + 5 * T^2) * H
+                    QK^T: 2 * T * T * D
+                    softmax_output(3~5 FLOPs/scalar): T * T add + T * T div + 3 * T * T exp
+                    AV: 2 * T * T * D
+                Output Projection: 2 * T * D^2
+            FFN FLOPs: 6 * T * D * d_ff + 5 * T * d_ff
+                w_1: 2 * T * D * d_ff
+                w_3: 2 * T * D * d_ff
+                w_2: 2 * T * d_ff * D
+                silu: 4 * T * d_ff
+                silu(w_1) * w3: T * d_ff
+        
+        Final RMSNorm FLOPs: 4 * T * D + 2
+        Final Head: 2 * T * D * V
+        
+        Optimizer FLOPs: 14 * N
+            per param
+            m-update: 2 mul, 1 add => 3
+            v-update: 1 mul for squaring, 2 mul for scaling, 1 add => 4
+            compute update term: 4
+            weight decay and parameter update: 3 
+            
+        Assume that the backward pass has twice the FLOPs of the forward pass
         """
-        N = Trainer.get_num_params(num_layers=num_layers, d_model=d_model,
-                                   vocab_size=vocab_size, d_ff=d_ff,
-                                   tie_word_embeddings=tie_word_embeddings)
+        B = batch_size
         L = num_layers
         H = num_heads
         D = d_model
-        Q = D // H
         T = context_length
-        flops_per_token = 6 * N + 12 * L * H * Q * T
-        return flops_per_token * T
+        V = vocab_size
+        
+        norms_flops = 2 * (4 * T * D + 2)
+        mhsa_proj_flops = 8 * T * D**2
+        mhsa_atten_flops = 2 * T**2 * D + (2 * T**2 * D + 5 * T**2) * H
+        mhsa_flops = mhsa_proj_flops + mhsa_atten_flops
+        ffn_flops = 6 * T * D * d_ff + 5 * T * d_ff
+        blocks_flops = L * (norms_flops + mhsa_flops + ffn_flops)
+        final_norm_flops = 4 * T * D + 2
+        final_head_flops = 2 * T * D * V
+        
+        total_flops = (blocks_flops + final_norm_flops + final_head_flops) * B
+        components = {"MHSA Projections": mhsa_proj_flops * L * B,
+                      "MHSA Attention": mhsa_atten_flops * L * B,
+                      "FFN": ffn_flops * L * B,
+                      "Head": final_head_flops * B,
+                      "Total": total_flops}
+        if not only_fwd:
+            N = Trainer.get_num_params(num_layers=num_layers, d_model=d_model,
+                                       vocab_size=vocab_size, d_ff=d_ff,
+                                       context_length=context_length, ffn_type=ffn_type,
+                                       tie_word_embeddings=tie_word_embeddings,
+                                       trainable_pos_embeddings=trainable_pos_embeddings)
+            optim_flops = 14 * N
+            total_flops = total_flops * 3 + optim_flops
+    
+        return total_flops, components
     
     @staticmethod
-    def estimate_MFU(fwdbwd_per_iter: int,
+    def estimate_MFU(batch_size: int,
+                     fwdbwd_per_iter: int,
                      dt: float,
                      num_layers: int,
                      d_model: int,
@@ -373,7 +439,9 @@ class Trainer:
                      d_ff: int,
                      num_heads: int,
                      context_length: int,
-                     tie_word_embeddings: bool = False) -> float:
+                     ffn_type: str = "SwiGLU",
+                     tie_word_embeddings: bool = False,
+                     trainable_pos_embeddings: bool = False) -> float:
         """ estimate model flops utilization (MFU) in units of A100 bfloat16 peak FLOPS 
         Args:
             fwdbwd_per_iter: number of forward-backward passes per iteration
@@ -392,10 +460,11 @@ class Trainer:
         """
         # first estimate the number of flops we do per iteration.
         # see PaLM paper Appendix B as ref: https://arxiv.org/abs/2204.02311
-        flops_per_fwdbwd = Trainer.estimate_FLOPS(num_layers=num_layers, d_model=d_model,
-                                                  vocab_size=vocab_size, d_ff=d_ff,
+        flops_per_fwdbwd, _ = Trainer.estimate_FLOPS(batch_size=batch_size, num_layers=num_layers,
+                                                  d_model=d_model, vocab_size=vocab_size, d_ff=d_ff,
                                                   num_heads=num_heads, context_length=context_length,
-                                                  tie_word_embeddings=tie_word_embeddings)
+                                                  ffn_type=ffn_type, tie_word_embeddings=tie_word_embeddings,
+                                                  trainable_pos_embeddings=trainable_pos_embeddings)
         flops_per_iter = flops_per_fwdbwd * fwdbwd_per_iter
         # express our flops throughput as ratio of A100 bfloat16 peak flops
         flops_achieved = flops_per_iter * (1.0/dt)  # per second
@@ -414,19 +483,22 @@ class Trainer:
                                    vocab_size: int,
                                    safe_factor: float = 1.2,
                                    use_flash_attention: bool = False,
-                                   use_checkpointing: bool = False) -> float:
+                                   use_checkpointing: bool = False) -> tuple[float, dict[str, int]]:
         B = batch_size
         L = num_layers
         H = num_heads
         D = d_model
         T = context_length
         V = vocab_size
+        unit = torch.finfo(dtype).bits // 8
+        components = {}
         
         if use_checkpointing:
             # 使用重计算时，只存储每层的输入，反向时重新计算中间结果
             # 激活值从 O(L) 降到 O(1)，但需要额外的前向时间
             # 这里简化: 只存储每层的输入，不存储中间激活
             block_mem = T * D  # 只存输入
+            components["layer_inputs"] = block_mem
         else:
             # Winthin each Transformer block:
             norm_in_out_mem = 4 * T * D  # RMSNorms
@@ -439,14 +511,20 @@ class Trainer:
                 attn_stats = H * T * 2 # softmax 统计量
                 attn_output = T * D
                 attn_mem = qkv_proj + attn_stats + attn_output
+                components["MHSA Attention"] = attn_stats
+                components["MHSA Projections"] = qkv_proj + attn_output
             else:
                 qkv_proj = 3 * T * D  # QKV projections
                 qk_T = H * T * T  # QK^T matrix multiply
                 softmax_in_out = 2 * H * T * T
                 out_proj = 2 * T * D  # Weighted sum and output projection
-                attn_mem = qkv_proj + qk_T + softmax_in_out + out_proj    
+                attn_mem = qkv_proj + qk_T + softmax_in_out + out_proj  
+                components["MHSA Attention"] = qk_T + softmax_in_out
+                components["MHSA Projections"] = qkv_proj + out_proj
             ffn_mem = 2 * T * d_ff + T * D  # (W_1) + GELU + (W_3) + (W_2) 
             block_mem = norm_in_out_mem + attn_mem + ffn_mem
+            components["FFN"] = ffn_mem
+            
         # 需要同时保留的关键张量：
         # - norm1_input, norm2_input (残差路径需要)
         # - qkv_output, qk_matmul, softmax_out (反向需要)
@@ -455,9 +533,13 @@ class Trainer:
         # input embedding, final norm, output embedding(logits), log_softmax, cross-entropy
         extra_mem = 2 * T * D + 3 * T * V
         activation_mem = B * (L * block_mem + extra_mem)
-        unit = torch.finfo(dtype).bits // 8
         activation_mem = activation_mem * unit
-        return activation_mem * safe_factor
+        
+        for k, v in components.items():
+            components[k] = v * B * L * unit
+        components["Head"] = T * V * B * unit
+        components["Activation"] = activation_mem
+        return activation_mem * safe_factor, components
     
     @staticmethod
     def estimate_train_memory(dtype: torch.dtype,
@@ -468,22 +550,28 @@ class Trainer:
                               context_length: int,
                               d_ff: int,
                               vocab_size: int,
+                              ffn_type: str = "SwiGLU",
                               tie_word_embeddings: bool = False,
+                              trainable_pos_embeddings: bool = False,
                               include_activation: bool = True,
                               use_flash_attention: bool = False,
-                              use_checkpointing: bool = False) -> float:
+                              use_checkpointing: bool = False) -> tuple[float, dict[str, int]]:
         N = Trainer.get_num_params(num_layers=num_layers, d_model=d_model,
                                    vocab_size=vocab_size, d_ff=d_ff,
-                                   tie_word_embeddings=tie_word_embeddings)
+                                   context_length=context_length, ffn_type=ffn_type,
+                                   tie_word_embeddings=tie_word_embeddings,
+                                   trainable_pos_embeddings=trainable_pos_embeddings)
+        print(N)
         unit = torch.finfo(dtype).bits // 8  # B
         model_mem = unit * N
+        print(model_mem)
         gradient_mem = model_mem
         # Adam 优化器: 3P (一阶矩 + 二阶矩，都是 fp32)
         optimizer_mem = 2 * N * 4
         peak_mem = model_mem + gradient_mem + optimizer_mem
-        print(f"Model+AdamW+Gradient: {peak_mem / 1024**3:.2f}GB")
+        components = {"Model&Optim": peak_mem}
         if include_activation:
-            activation_mem = Trainer.estimate_activation_memory(
+            activation_mem, details = Trainer.estimate_activation_memory(
                 batch_size=batch_size,
                 dtype=dtype,
                 num_layers=num_layers,
@@ -495,9 +583,12 @@ class Trainer:
                 use_flash_attention=use_flash_attention,
                 use_checkpointing=use_checkpointing
             )
-            print(f"Activation: {activation_mem / 1024**3:.2f}GB")
+            components.update(**details)
+            components["Total"] = peak_mem + details["Activation"]
             peak_mem += activation_mem
-        return peak_mem
+        else:
+            components["Total"] = peak_mem
+        return peak_mem, components
     
     @staticmethod
     def estimate_training_time(batch_size: int,
@@ -512,17 +603,22 @@ class Trainer:
                                eval_interval: int,
                                eval_iterations: int,
                                test_infer: bool = False,
+                               ffn_type: str = "SwiGLU",
+                               tie_word_embeddings: bool = False,
+                               trainable_pos_embeddings: bool = False,
                                eval_batch_size: Optional[int] = None,
                                prompts: Optional[list[str]] = None,
                                max_new_tokens: Optional[int] = None,
-                               mfu: float = 0.45) -> str:
+                               mfu: float = 0.45) -> tuple[str, dict[str, int]]:
         # 每个序列的 FLOPs
-        flops_per_seq = Trainer.estimate_FLOPS(num_layers=num_layers, d_model=d_model,
-                                               vocab_size=vocab_size, d_ff=d_ff,
-                                               num_heads=num_heads, context_length=context_length)
         # 每个 forward-backward 的 FLOPs
         # 注意：fwdbwd_per_iter = batch_size / grad_accum_steps
-        flops_per_iter = flops_per_seq * batch_size
+        flops_per_iter, details = Trainer.estimate_FLOPS(batch_size=batch_size*gradient_accumulation_steps,
+                                                num_layers=num_layers, d_model=d_model,
+                                                vocab_size=vocab_size, d_ff=d_ff,
+                                                num_heads=num_heads, context_length=context_length,
+                                                ffn_type=ffn_type, tie_word_embeddings=tie_word_embeddings,
+                                                trainable_pos_embeddings=trainable_pos_embeddings)
         
         # 计算总迭代次数
         tokens_per_iter = batch_size * context_length
@@ -536,7 +632,7 @@ class Trainer:
         peak_flops = GPU_PEAK_FLOPS["RTX4090"]
         achievable_flops = peak_flops * mfu
         
-        # 计算时间
+        # 计算时间：和真实时间有较大出入，因为加载数据、保存模型等IO操作比较费时间
         seconds_per_iter = flops_per_iter / achievable_flops
         total_seconds = seconds_per_iter * total_effective_iters
         
@@ -547,7 +643,8 @@ class Trainer:
             time_per_eval = Trainer.estimate_single_validate_time(
                 batch_size=eval_batch_size or batch_size, eval_iterations=eval_iterations,
                 num_layers=num_layers, d_model=d_model, vocab_size=vocab_size, d_ff=d_ff,
-                num_heads=num_heads, context_length=context_length, mfu=mfu)
+                num_heads=num_heads, context_length=context_length, mfu=mfu,
+                tie_word_embeddings=tie_word_embeddings)
             total_eval_time = time_per_eval * num_evals
             extra_time_str = f"(Eval:{format_time(total_eval_time)}"
             
@@ -555,7 +652,8 @@ class Trainer:
                 sample_time_per_eval = Trainer.estimate_sampling_time(
                     prompts=prompts, max_new_tokens=max_new_tokens,
                     num_layers=num_layers, d_model=d_model, vocab_size=vocab_size, d_ff=d_ff,
-                    num_heads=num_heads, context_length=context_length, mfu=mfu)
+                    num_heads=num_heads, context_length=context_length, mfu=mfu,
+                    tie_word_embeddings=tie_word_embeddings)
                 sample_time = sample_time_per_eval * num_evals
                 total_eval_time += sample_time
                 extra_time_str += f",Infer:{format_time(sample_time)}"
@@ -564,7 +662,7 @@ class Trainer:
             extra_time_str += ")"
         
         # 转换为可读格式
-        return format_time(total_seconds) + extra_time_str
+        return format_time(total_seconds) + extra_time_str, details
     
     @staticmethod
     def estimate_single_validate_time(batch_size: int,
@@ -575,13 +673,16 @@ class Trainer:
                                       d_ff: int,
                                       num_heads: int,
                                       context_length: int,
+                                      ffn_type: str = "SwiGLU",
+                                      tie_word_embeddings: bool = False,
+                                      trainable_pos_embeddings: bool = False,
                                       mfu: float=0.45) -> float:
-        # 每个序列的 FLOPs
-        flops_per_seq = Trainer.estimate_FLOPS(num_layers=num_layers, d_model=d_model,
-                                               vocab_size=vocab_size, d_ff=d_ff,
-                                               num_heads=num_heads, context_length=context_length)
         # 计算评估时每次迭代的FLOPs
-        flops_per_eval_iter = flops_per_seq * batch_size
+        flops_per_eval_iter, _ = Trainer.estimate_FLOPS(batch_size=batch_size, num_layers=num_layers,
+                                                     d_model=d_model, vocab_size=vocab_size, d_ff=d_ff,
+                                                     num_heads=num_heads, context_length=context_length,
+                                                     tie_word_embeddings=tie_word_embeddings, only_fwd=True,
+                                                     ffn_type=ffn_type, trainable_pos_embeddings=trainable_pos_embeddings)
         
         # 计算每秒可处理的FLOPs
         peak_flops = GPU_PEAK_FLOPS["RTX4090"]
@@ -604,11 +705,16 @@ class Trainer:
                                d_ff: int,
                                num_heads: int,
                                context_length: int,
+                               ffn_type: str = "SwiGLU",
+                               tie_word_embeddings: bool = False,
+                               trainable_pos_embeddings: bool = False,
                                mfu: float=0.45) -> float:
         # 每个序列的 FLOPs
-        flops_per_seq = Trainer.estimate_FLOPS(num_layers=num_layers, d_model=d_model,
+        flops_per_seq, _ = Trainer.estimate_FLOPS(num_layers=num_layers,d_model=d_model,
                                                vocab_size=vocab_size, d_ff=d_ff,
-                                               num_heads=num_heads, context_length=context_length)
+                                               num_heads=num_heads, context_length=context_length,
+                                               tie_word_embeddings=tie_word_embeddings, only_fwd=True,
+                                               ffn_type=ffn_type, trainable_pos_embeddings=trainable_pos_embeddings)
         
         # 计算每秒可处理的FLOPs
         peak_flops = GPU_PEAK_FLOPS["RTX4090"]
@@ -643,16 +749,17 @@ class Trainer:
         2. esitmate memory usage
         3. estimate training time TODO adding evaluation time
         """
-        train_mem = Trainer.estimate_train_memory(
+        train_mem, mem_info = Trainer.estimate_train_memory(
             dtype=self.dtype, batch_size=self.training_cfg.train_batch_size,
             num_layers=self.model_cfg.num_layers, num_heads=self.model_cfg.num_heads,
             d_model=self.model_cfg.d_model, context_length=self.model_cfg.context_length,
             d_ff=self.model_cfg.d_ff, vocab_size=self.model_cfg.vocab_size,
-            include_activation=False, tie_word_embeddings=self.model_cfg.tie_word_embeddings)
-        remain_mem = self.min_free_mem - train_mem 
+            include_activation=False, tie_word_embeddings=self.model_cfg.tie_word_embeddings,
+            ffn_type=self.model_cfg.ffn_type, trainable_pos_embeddings=self.model_cfg.rope_theta is None)
+        remain_mem = self.min_free_mem - train_mem
         if remain_mem <= 0:
-            raise ValueError(f"OOM: current available GPU memory: {self.min_free_mem / (1024 ** 3):.2f} GB")
-        activation_mem_per_sample = Trainer.estimate_activation_memory(
+            raise ValueError(f"OOM: current available GPU memory: {self.min_free_mem / (1024 ** 3):.2f} GB, require memory: {train_mem / (1024 ** 3):.2f} GB")
+        activation_mem_per_sample, action_mem_info = Trainer.estimate_activation_memory(
             batch_size=1, dtype=self.dtype, num_layers=self.model_cfg.num_layers,
             num_heads=self.model_cfg.num_heads, d_model=self.model_cfg.d_model,
             context_length=self.model_cfg.context_length, d_ff=self.model_cfg.d_ff,
@@ -683,7 +790,7 @@ class Trainer:
         
         if self.is_master_process:
             gb_unit = 1024 ** 3  # BUG real training time: 45m, GPU: 18614MB, estimate 4m, 0.70GB
-            training_time = Trainer.estimate_training_time(
+            training_time, flops_info = Trainer.estimate_training_time(
                 batch_size=self.training_cfg.train_batch_size, num_layers=self.model_cfg.num_layers,
                 num_heads=self.model_cfg.num_heads, d_model=self.model_cfg.d_model,
                 context_length=self.model_cfg.context_length, d_ff=self.model_cfg.d_ff,
@@ -691,10 +798,15 @@ class Trainer:
                 gradient_accumulation_steps=self.training_cfg.gradient_accumulation_steps,
                 eval_interval=self.training_cfg.eval_interval, eval_iterations=self.training_cfg.eval_iterations,
                 test_infer=self.training_cfg.test_infer, prompts=self.infer_cfg.prompts,
-                max_new_tokens=self.infer_cfg.max_new_tokens, eval_batch_size=self.training_cfg.eval_batch_size)
+                max_new_tokens=self.infer_cfg.max_new_tokens, eval_batch_size=self.training_cfg.eval_batch_size,
+                ffn_type=self.model_cfg.ffn_type, trainable_pos_embeddings=self.model_cfg.rope_theta is None)
             logger.info(f"Recommended batch_size: {recommend_bs}, current batch_size: {batch_size}")
             logger.info(f"Estimated memory usage: {occupied_mem / gb_unit:.2f} GB({train_mem/ gb_unit:.2f} + {activation_mem / gb_unit:.2f}) / {self.min_free_mem / gb_unit:.2f} GB")
+            mem_info.update(**action_mem_info)
+            mem_info["Total"] += action_mem_info["Activation"]
+            logger.info(f"Memory details:\n{str(print_table(mem_info, gb_unit, "GB"))}")
             logger.info(f"Estimated training time: {training_time}")
+            logger.info(f"FLOPs details:\n{str(print_table(flops_info, 1e12, "B"))}")
             logger.info(f"Total training step: {self.training_cfg.train_steps}")
             logger.info(f"Total number of tokens per training step: {self.training_cfg.total_tokens // self.training_cfg.train_steps}")
     
@@ -921,24 +1033,25 @@ class Trainer:
             logger.info("Training completed!")
             
 
-@hydra.main(config_path="train_configs/", config_name="pretrain_cs336_lm", version_base=None)
+@hydra.main(config_path="train_configs/", config_name="pretrain", version_base=None)
 def main(cfg: DictConfig):
-    tokenizer = BPETokenizer.from_files(**cfg.tokenizer)
-    logger.info(f"vocab size: {tokenizer.vocab_size}")
-    if cfg.model_type == "qwen2_5":
-        model = Qwen2_5(**cfg.model)
-    else:
-        model = BasicsTransformerLM(**cfg.model)
+    # tokenizer = BPETokenizer.from_files(**cfg.tokenizer)
+    # logger.info(f"vocab size: {tokenizer.vocab_size}")
+    # if cfg.model_type == "qwen2_5":
+    #     model = Qwen2_5(**cfg.model)
+    # else:
+    #     model = BasicsTransformerLM(**cfg.model)
     
     if not torch.cuda.is_available():
         cfg.training.device = "cpu"
     
-    prompts = cfg.inference.prompts
-    if isinstance(prompts, str) and os.path.isfile(prompts):
-        import json
-        prompts = json.load(open(prompts))
-        cfg.inference.prompts = prompts
-        
+    # prompts = cfg.inference.prompts
+    # if isinstance(prompts, str) and os.path.isfile(prompts):
+    #     import json
+    #     prompts = json.load(open(prompts))
+    #     cfg.inference.prompts = prompts
+    model = None
+    tokenizer = None
     trainer = Trainer(model, cfg, tokenizer)
     trainer.is_ddp = False
     trainer.is_master_process = True

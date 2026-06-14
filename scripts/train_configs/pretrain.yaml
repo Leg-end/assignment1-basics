@@ -13,6 +13,10 @@ vocab_size_map:
   TinyStoriesV2: 10000
   owt: 32000
 
+defaults:
+  - _self_
+  - model: GPT-2_XL
+
 paths:
   train_bin: ${dat_dir}/train.bin
   valid_bin: ${dat_dir}/valid.bin
@@ -55,17 +59,6 @@ inference:
   top_k: null
   top_p: 0.9
   repetition_penalty: 1.0
-  
-
-model:
-  vocab_size: ${vocab_size_map.${dataset_name}}
-  context_length: 256
-  d_model: 512
-  num_layers: 4
-  num_heads: 16
-  d_ff: 1344
-  rope_theta: 10000.0
-  tie_word_embeddings: false
 
 tokenizer:
   vocab_path: ${paths.tokenizer_dir}/vocab.pkl

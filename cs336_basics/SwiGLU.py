@@ -36,7 +36,7 @@ class SwiGLU(nn.Module):
         return self.w2(silu(self.w1(x)) * self.w3(x))
     
     def get_FLOPS(self, ctx_len):
-        w1_flops = 2 * ctx_len * self.d_ff * self.d_model + 2 * ctx_len * self.d_ff
+        w1_flops = 2 * ctx_len * self.d_ff * self.d_model
         w2_flops = 2 * ctx_len * self.d_ff * self.d_model
-        w3_flops = ctx_len * self.d_ff + 2 * ctx_len * self.d_ff * self.d_model
-        return w1_flops + w2_flops + w3_flops
+        w3_flops = 2 * ctx_len * self.d_ff * self.d_model
+        return w1_flops + w2_flops + w3_flops + 5 * ctx_len * self.d_ff

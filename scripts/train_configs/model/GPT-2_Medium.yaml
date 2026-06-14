@@ -1,0 +1,9 @@
+vocab_size: 50257
+context_length: 1024
+d_model: 1024
+num_layers: 24
+num_heads: 16
+d_ff: 4096
+rope_theta: null
+tie_word_embeddings: false
+ffn_type: GELU
