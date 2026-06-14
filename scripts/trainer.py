@@ -372,9 +372,9 @@ class Trainer:
                 gamma: T * D
             MHSA FLOPs: 8 * T * D^2 + 2 * T^2 * D + (2 * T^2 * D + 5 * T^2) * H
                 Computing Query, Key, and Value Matrices: 3 * 2 * T * D^2
-                Computing Attention Scores and Output: 2 * T^2 * D + (2 * T^2 * D + 5 * T^2) * H
+                Computing Attention Scores and Output: 2 * T^2 * D + 2 * T^2 * D + 5 * T^2 * H
                     QK^T: 2 * T * T * D
-                    softmax_output(3~5 FLOPs/scalar): T * T add + T * T div + 3 * T * T exp
+                    softmax_output(3~5 FLOPs/scalar, per head): T * T add + T * T div + 3 * T * T exp
                     AV: 2 * T * T * D
                 Output Projection: 2 * T * D^2
             FFN FLOPs: 6 * T * D * d_ff + 5 * T * d_ff
@@ -405,9 +405,12 @@ class Trainer:
         
         norms_flops = 2 * (4 * T * D + 2)
         mhsa_proj_flops = 8 * T * D**2
-        mhsa_atten_flops = 2 * T**2 * D + (2 * T**2 * D + 5 * T**2) * H
+        mhsa_atten_flops = 2 * T**2 * D + 2 * T**2 * D + 5 * T**2 * H
         mhsa_flops = mhsa_proj_flops + mhsa_atten_flops
-        ffn_flops = 6 * T * D * d_ff + 5 * T * d_ff
+        if ffn_type == "SwiGLU":
+            ffn_flops = 6 * T * D * d_ff + 5 * T * d_ff
+        else:
+            ffn_flops = 4 * T * D * d_ff
         blocks_flops = L * (norms_flops + mhsa_flops + ffn_flops)
         final_norm_flops = 4 * T * D + 2
         final_head_flops = 2 * T * D * V
@@ -561,10 +564,8 @@ class Trainer:
                                    context_length=context_length, ffn_type=ffn_type,
                                    tie_word_embeddings=tie_word_embeddings,
                                    trainable_pos_embeddings=trainable_pos_embeddings)
-        print(N)
         unit = torch.finfo(dtype).bits // 8  # B
         model_mem = unit * N
-        print(model_mem)
         gradient_mem = model_mem
         # Adam 优化器: 3P (一阶矩 + 二阶矩，都是 fp32)
         optimizer_mem = 2 * N * 4
@@ -802,11 +803,13 @@ class Trainer:
                 ffn_type=self.model_cfg.ffn_type, trainable_pos_embeddings=self.model_cfg.rope_theta is None)
             logger.info(f"Recommended batch_size: {recommend_bs}, current batch_size: {batch_size}")
             logger.info(f"Estimated memory usage: {occupied_mem / gb_unit:.2f} GB({train_mem/ gb_unit:.2f} + {activation_mem / gb_unit:.2f}) / {self.min_free_mem / gb_unit:.2f} GB")
+            for k, v in action_mem_info.items():
+                action_mem_info[k] = v * batch_size
             mem_info.update(**action_mem_info)
             mem_info["Total"] += action_mem_info["Activation"]
             logger.info(f"Memory details:\n{str(print_table(mem_info, gb_unit, "GB"))}")
             logger.info(f"Estimated training time: {training_time}")
-            logger.info(f"FLOPs details:\n{str(print_table(flops_info, 1e12, "B"))}")
+            logger.info(f"FLOPs details:\n{str(print_table(flops_info, 1e9, "B"))}")
             logger.info(f"Total training step: {self.training_cfg.train_steps}")
             logger.info(f"Total number of tokens per training step: {self.training_cfg.total_tokens // self.training_cfg.train_steps}")
     

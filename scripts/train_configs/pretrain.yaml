@@ -15,7 +15,7 @@ vocab_size_map:
 
 defaults:
   - _self_
-  - model: GPT-2_XL
+  - model: cs336_lm
 
 paths:
   train_bin: ${dat_dir}/train.bin
