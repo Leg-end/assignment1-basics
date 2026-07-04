@@ -15,7 +15,7 @@ vocab_size_map:
 
 defaults:
   - _self_
-  - model: cs336_lm
+  - model: GPT-2_XL
 
 paths:
   train_bin: ${dat_dir}/train.bin
@@ -25,12 +25,12 @@ paths:
 
 training:
   enable: True
-  total_tokens: 327680000  # batch size × total step count × context length × GPU count × grad accu
+  total_tokens: null  # batch size × total step count × context length × GPU count × grad accu
   seed: 1234
   dtype: float32
-  train_batch_size: 128
-  eval_batch_size: 128
-  train_steps: 5000
+  train_batch_size: 1
+  eval_batch_size: 1
+  train_steps: 400000
   gradient_accumulation_steps: 1
   compile: false
   eval_iterations: 100
